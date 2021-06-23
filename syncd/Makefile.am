@@ -16,7 +16,16 @@ endif
 
 noinst_LIBRARIES = libSyncd.a libSyncdRequestShutdown.a
 libSyncd_a_SOURCES = \
+				SaiSwitchInterface.cpp \
+				ZeroMQSelectableChannel.cpp \
+				RedisSelectableChannel.cpp \
+				SelectableChannel.cpp \
+				ZeroMQNotificationProducer.cpp \
+				RedisNotificationProducer.cpp \
+				ComparisonLogic.cpp \
 				Syncd.cpp \
+				BreakConfig.cpp \
+				BreakConfigParser.cpp \
 				RedisClient.cpp \
 				WarmRestartTable.cpp \
 				RequestShutdownCommandLineOptions.cpp \
@@ -25,7 +34,6 @@ libSyncd_a_SOURCES = \
 				Workaround.cpp \
 				ServiceMethodTable.cpp \
 				SwitchNotifications.cpp \
-				ComparisonLogic.cpp \
 				VirtualOidTranslator.cpp \
 				NotificationProcessor.cpp \
 				NotificationHandler.cpp \
@@ -43,7 +51,7 @@ libSyncd_a_SOURCES = \
 				SaiObj.cpp \
 				SaiAttr.cpp \
 				VendorSai.cpp \
-				syncd.cpp \
+				syncd_main.cpp \
 				TimerWatchdog.cpp \
 				NotificationQueue.cpp \
 				CommandLineOptions.cpp \
@@ -55,7 +63,7 @@ libSyncd_a_CPPFLAGS = $(DBGFLAGS) $(AM_CPPFLAGS) $(CFLAGS_COMMON) $(SAIFLAGS) -s
 
 syncd_SOURCES = main.cpp
 syncd_CPPFLAGS = $(DBGFLAGS) $(AM_CPPFLAGS) $(CFLAGS_COMMON) $(SAIFLAGS)
-syncd_LDADD = libSyncd.a ../lib/src/libSaiRedis.a -L$(top_srcdir)/meta/.libs -lsaimetadata -lsaimeta -ldl -lhiredis -lswsscommon $(SAILIB) -lpthread
+syncd_LDADD = libSyncd.a ../lib/src/libSaiRedis.a -L$(top_srcdir)/meta/.libs -lsaimetadata -lsaimeta -ldl -lhiredis -lswsscommon $(SAILIB) -lpthread -lzmq
 
 if SAITHRIFT
 libSyncd_a_CPPFLAGS += -DSAITHRIFT=yes
@@ -82,5 +90,5 @@ syncd_request_shutdown_LDADD = libSyncdRequestShutdown.a ../lib/src/libSaiRedis.
 tests_SOURCES = tests.cpp
 
 tests_CPPFLAGS = $(DBGFLAGS) $(AM_CPPFLAGS) $(CFLAGS_COMMON)
-tests_LDADD = libSyncd.a -lhiredis -lswsscommon -lpthread -L$(top_srcdir)/lib/src/.libs -lsairedis -L$(top_srcdir)/meta/.libs -lsaimetadata -lsaimeta
+tests_LDADD = libSyncd.a -lhiredis -lswsscommon -lpthread -L$(top_srcdir)/lib/src/.libs -lsairedis -L$(top_srcdir)/meta/.libs -lsaimetadata -lsaimeta -lzmq
 TESTS = tests

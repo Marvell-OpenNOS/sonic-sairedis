@@ -2,6 +2,8 @@
 
 #include "LaneMap.h"
 #include "EventQueue.h"
+#include "ResourceLimiter.h"
+#include "CorePortIndexMap.h"
 
 #include <string>
 #include <memory>
@@ -38,7 +40,9 @@ namespace saivs
     {
         public:
 
-            SwitchConfig();
+            SwitchConfig(
+                    _In_ uint32_t switchIndex,
+                    _In_ const std::string& hwinfo);
 
             virtual ~SwitchConfig() = default;
 
@@ -75,6 +79,12 @@ namespace saivs
 
             std::shared_ptr<LaneMap> m_laneMap;
 
+            std::shared_ptr<LaneMap> m_fabricLaneMap;
+
             std::shared_ptr<EventQueue> m_eventQueue;
+
+            std::shared_ptr<ResourceLimiter> m_resourceLimiter;
+
+            std::shared_ptr<CorePortIndexMap> m_corePortIndexMap;
     };
 }

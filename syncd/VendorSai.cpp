@@ -112,7 +112,7 @@ sai_status_t VendorSai::create(
 
     if (!info)
     {
-        SWSS_LOG_ERROR("unable to get info for obejct type: %s",
+        SWSS_LOG_ERROR("unable to get info for object type: %s",
                 sai_serialize_object_type(objectType).c_str());
 
         return SAI_STATUS_FAILURE;
@@ -158,15 +158,15 @@ sai_status_t VendorSai::remove(
 
     if (!info)
     {
-        SWSS_LOG_ERROR("unable to get info for obejct type: %s",
+        SWSS_LOG_ERROR("unable to get info for object type: %s",
                 sai_serialize_object_type(objectType).c_str());
 
         return SAI_STATUS_FAILURE;
     }
 
-    if (!info->create)
+    if (!info->remove)
     {
-        SWSS_LOG_ERROR("object type %s has no create method",
+        SWSS_LOG_ERROR("object type %s has no remove method",
                 sai_serialize_object_type(objectType).c_str());
 
         return SAI_STATUS_FAILURE;
@@ -198,15 +198,15 @@ sai_status_t VendorSai::set(
 
     if (!info)
     {
-        SWSS_LOG_ERROR("unable to get info for obejct type: %s",
+        SWSS_LOG_ERROR("unable to get info for object type: %s",
                 sai_serialize_object_type(objectType).c_str());
 
         return SAI_STATUS_FAILURE;
     }
 
-    if (!info->create)
+    if (!info->set)
     {
-        SWSS_LOG_ERROR("object type %s has no create method",
+        SWSS_LOG_ERROR("object type %s has no set method",
                 sai_serialize_object_type(objectType).c_str());
 
         return SAI_STATUS_FAILURE;
@@ -246,15 +246,15 @@ sai_status_t VendorSai::get(
 
     if (!info)
     {
-        SWSS_LOG_ERROR("unable to get info for obejct type: %s",
+        SWSS_LOG_ERROR("unable to get info for object type: %s",
                 sai_serialize_object_type(objectType).c_str());
 
         return SAI_STATUS_FAILURE;
     }
 
-    if (!info->create)
+    if (!info->get)
     {
-        SWSS_LOG_ERROR("object type %s has no create method",
+        SWSS_LOG_ERROR("object type %s has no get method",
                 sai_serialize_object_type(objectType).c_str());
 
         return SAI_STATUS_FAILURE;
@@ -645,7 +645,7 @@ sai_status_t VendorSai::bulkCreate(
             ptr = m_apis.lag_api->create_lag_members;
             break;
 
-        case SAI_OBJECT_TYPE_NEXT_HOP_GROUP:
+        case SAI_OBJECT_TYPE_NEXT_HOP_GROUP_MEMBER:
             ptr = m_apis.next_hop_group_api->create_next_hop_group_members;
             break;
 
@@ -662,8 +662,14 @@ sai_status_t VendorSai::bulkCreate(
             break;
 
         default:
-            SWSS_LOG_ERROR("not implemented, FIXME");
-            return SAI_STATUS_FAILURE;
+            SWSS_LOG_ERROR("not implemented %s, FIXME", sai_serialize_object_type(object_type).c_str());
+            return SAI_STATUS_NOT_IMPLEMENTED;
+    }
+
+    if (!ptr)
+    {
+        SWSS_LOG_INFO("create bulk not supported from SAI, object_type = %s",  sai_serialize_object_type(object_type).c_str());
+        return SAI_STATUS_NOT_SUPPORTED;
     }
 
     return ptr(switch_id,
@@ -698,7 +704,7 @@ sai_status_t VendorSai::bulkRemove(
             ptr = m_apis.lag_api->remove_lag_members;
             break;
 
-        case SAI_OBJECT_TYPE_NEXT_HOP_GROUP:
+        case SAI_OBJECT_TYPE_NEXT_HOP_GROUP_MEMBER:
             ptr = m_apis.next_hop_group_api->remove_next_hop_group_members;
             break;
 
@@ -715,8 +721,14 @@ sai_status_t VendorSai::bulkRemove(
             break;
 
         default:
-            SWSS_LOG_ERROR("not implemented, FIXME");
-            return SAI_STATUS_FAILURE;
+            SWSS_LOG_ERROR("not implemented %s, FIXME", sai_serialize_object_type(object_type).c_str());
+            return SAI_STATUS_NOT_IMPLEMENTED;
+    }
+
+    if (!ptr)
+    {
+        SWSS_LOG_INFO("remove bulk not supported from SAI, object_type = %s",  sai_serialize_object_type(object_type).c_str());
+        return SAI_STATUS_NOT_SUPPORTED;
     }
 
     return ptr(object_count, object_id, mode, object_statuses);
@@ -753,6 +765,12 @@ sai_status_t VendorSai::bulkCreate(
     SWSS_LOG_ENTER();
     VENDOR_CHECK_API_INITIALIZED();
 
+    if (!m_apis.route_api->create_route_entries)
+    {
+        SWSS_LOG_INFO("create_route_entries is not supported");
+        return SAI_STATUS_NOT_SUPPORTED;
+    }
+
     return m_apis.route_api->create_route_entries(
             object_count,
             entries,
@@ -774,9 +792,46 @@ sai_status_t VendorSai::bulkCreate(
     SWSS_LOG_ENTER();
     VENDOR_CHECK_API_INITIALIZED();
 
-    SWSS_LOG_ERROR("not supported by SAI");
+    if (!m_apis.fdb_api->create_fdb_entries)
+    {
+        SWSS_LOG_INFO("create_fdb_entries is not supported");
+        return SAI_STATUS_NOT_SUPPORTED;
+    }
 
-    return SAI_STATUS_NOT_SUPPORTED;
+    return m_apis.fdb_api->create_fdb_entries(
+            object_count,
+            entries,
+            attr_count,
+            attr_list,
+            mode,
+            object_statuses);
+}
+
+sai_status_t VendorSai::bulkCreate(
+        _In_ uint32_t object_count,
+        _In_ const sai_inseg_entry_t* entries,
+        _In_ const uint32_t *attr_count,
+        _In_ const sai_attribute_t **attr_list,
+        _In_ sai_bulk_op_error_mode_t mode,
+        _Out_ sai_status_t *object_statuses)
+{
+    MUTEX();
+    SWSS_LOG_ENTER();
+    VENDOR_CHECK_API_INITIALIZED();
+
+    if (!m_apis.mpls_api->create_inseg_entries)
+    {
+        SWSS_LOG_INFO("create_inseg_entries is not supported");
+        return SAI_STATUS_NOT_SUPPORTED;
+    }
+
+    return m_apis.mpls_api->create_inseg_entries(
+            object_count,
+            entries,
+            attr_count,
+            attr_list,
+            mode,
+            object_statuses);
 }
 
 sai_status_t VendorSai::bulkCreate(
@@ -790,6 +845,12 @@ sai_status_t VendorSai::bulkCreate(
     MUTEX();
     SWSS_LOG_ENTER();
     VENDOR_CHECK_API_INITIALIZED();
+
+    if (!m_apis.nat_api->create_nat_entries)
+    {
+        SWSS_LOG_INFO("create_nat_entries is not supported");
+        return SAI_STATUS_NOT_SUPPORTED;
+    }
 
     return m_apis.nat_api->create_nat_entries(
             object_count,
@@ -811,6 +872,13 @@ sai_status_t VendorSai::bulkRemove(
     MUTEX();
     SWSS_LOG_ENTER();
     VENDOR_CHECK_API_INITIALIZED();
+
+    if (!m_apis.route_api->remove_route_entries)
+    {
+        SWSS_LOG_INFO("remove_route_entries is not supported");
+        return SAI_STATUS_NOT_SUPPORTED;
+    }
+
     return m_apis.route_api->remove_route_entries(
             object_count,
             entries,
@@ -829,9 +897,40 @@ sai_status_t VendorSai::bulkRemove(
     SWSS_LOG_ENTER();
     VENDOR_CHECK_API_INITIALIZED();
 
-    SWSS_LOG_ERROR("not supported by SAI");
+    if (!m_apis.fdb_api->remove_fdb_entries)
+    {
+        SWSS_LOG_INFO("remove_fdb_entries is not supported");
+        return SAI_STATUS_NOT_SUPPORTED;
+    }
 
-    return SAI_STATUS_NOT_SUPPORTED;
+    return m_apis.fdb_api->remove_fdb_entries(
+            object_count,
+            entries,
+            mode,
+            object_statuses);;
+}
+
+sai_status_t VendorSai::bulkRemove(
+        _In_ uint32_t object_count,
+        _In_ const sai_inseg_entry_t *entries,
+        _In_ sai_bulk_op_error_mode_t mode,
+        _Out_ sai_status_t *object_statuses)
+{
+    MUTEX();
+    SWSS_LOG_ENTER();
+    VENDOR_CHECK_API_INITIALIZED();
+
+    if (!m_apis.mpls_api->remove_inseg_entries)
+    {
+        SWSS_LOG_INFO("remove_inseg_entries is not supported");
+        return SAI_STATUS_NOT_SUPPORTED;
+    }
+
+    return m_apis.mpls_api->remove_inseg_entries(
+            object_count,
+            entries,
+            mode,
+            object_statuses);;
 }
 
 sai_status_t VendorSai::bulkRemove(
@@ -843,6 +942,13 @@ sai_status_t VendorSai::bulkRemove(
     MUTEX();
     SWSS_LOG_ENTER();
     VENDOR_CHECK_API_INITIALIZED();
+
+    if (!m_apis.nat_api->remove_nat_entries)
+    {
+        SWSS_LOG_INFO("remove_nat_entries is not supported");
+        return SAI_STATUS_NOT_SUPPORTED;
+    }
+
     return m_apis.nat_api->remove_nat_entries(
             object_count,
             entries,
@@ -863,6 +969,12 @@ sai_status_t VendorSai::bulkSet(
     SWSS_LOG_ENTER();
     VENDOR_CHECK_API_INITIALIZED();
 
+    if (!m_apis.route_api->set_route_entries_attribute)
+    {
+        SWSS_LOG_INFO("set_route_entries_attribute is not supported");
+        return SAI_STATUS_NOT_SUPPORTED;
+    }
+
     return m_apis.route_api->set_route_entries_attribute(
             object_count,
             entries,
@@ -882,9 +994,43 @@ sai_status_t VendorSai::bulkSet(
     SWSS_LOG_ENTER();
     VENDOR_CHECK_API_INITIALIZED();
 
-    SWSS_LOG_ERROR("not supported by SAI");
+    if (!m_apis.fdb_api->set_fdb_entries_attribute)
+    {
+        SWSS_LOG_INFO("set_fdb_entries_attribute is not supported");
+        return SAI_STATUS_NOT_SUPPORTED;
+    }
 
-    return SAI_STATUS_NOT_SUPPORTED;
+    return m_apis.fdb_api->set_fdb_entries_attribute(
+            object_count,
+            entries,
+            attr_list,
+            mode,
+            object_statuses);;
+}
+
+sai_status_t VendorSai::bulkSet(
+        _In_ uint32_t object_count,
+        _In_ const sai_inseg_entry_t *entries,
+        _In_ const sai_attribute_t *attr_list,
+        _In_ sai_bulk_op_error_mode_t mode,
+        _Out_ sai_status_t *object_statuses)
+{
+    MUTEX();
+    SWSS_LOG_ENTER();
+    VENDOR_CHECK_API_INITIALIZED();
+
+    if (!m_apis.mpls_api->set_inseg_entries_attribute)
+    {
+        SWSS_LOG_INFO("set_inseg_entries_attribute is not supported");
+        return SAI_STATUS_NOT_SUPPORTED;
+    }
+
+    return m_apis.mpls_api->set_inseg_entries_attribute(
+            object_count,
+            entries,
+            attr_list,
+            mode,
+            object_statuses);;
 }
 
 sai_status_t VendorSai::bulkSet(
@@ -897,6 +1043,12 @@ sai_status_t VendorSai::bulkSet(
     MUTEX();
     SWSS_LOG_ENTER();
     VENDOR_CHECK_API_INITIALIZED();
+
+    if (!m_apis.nat_api->set_nat_entries_attribute)
+    {
+        SWSS_LOG_INFO("set_nat_entries_attribute is not supported");
+        return SAI_STATUS_NOT_SUPPORTED;
+    }
 
     return m_apis.nat_api->set_nat_entries_attribute(
             object_count,

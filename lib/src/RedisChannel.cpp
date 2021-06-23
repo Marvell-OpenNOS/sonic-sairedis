@@ -9,15 +9,10 @@
 
 using namespace sairedis;
 
-/**
- * @brief Get response timeout in milliseconds.
- */
-#define REDIS_ASIC_STATE_COMMAND_GETRESPONSE_TIMEOUT_MS (60*1000)
-
 RedisChannel::RedisChannel(
         _In_ const std::string& dbAsic,
-        _In_ Callback callback):
-    m_callback(callback),
+        _In_ Channel::Callback callback):
+    Channel(callback),
     m_dbAsic(dbAsic)
 {
     SWSS_LOG_ENTER();
@@ -25,7 +20,7 @@ RedisChannel::RedisChannel(
     // TODO this connection info must be obtained from config
 
     m_db                    = std::make_shared<swss::DBConnector>(dbAsic, 0);
-    m_redisPipeline         = std::make_shared<swss::RedisPipeline>(m_db.get()); //enable default pipeline 128
+    m_redisPipeline         = std::make_shared<swss::RedisPipeline>(m_db.get()); // enable default pipeline 128
     m_asicState             = std::make_shared<swss::ProducerTable>(m_redisPipeline.get(), ASIC_STATE_TABLE, true);
     m_getConsumer           = std::make_shared<swss::ConsumerTable>(m_db.get(), REDIS_TABLE_GETRESPONSE);
 
@@ -48,7 +43,11 @@ RedisChannel::~RedisChannel()
     // notify thread that it should end
     m_notificationThreadShouldEndEvent.notify();
 
+    SWSS_LOG_NOTICE("join ntf thread begin");
+
     m_notificationThread->join();
+
+    SWSS_LOG_NOTICE("join ntf thread end");
 }
 
 std::shared_ptr<swss::DBConnector> RedisChannel::getDbConnector() const
@@ -171,11 +170,11 @@ sai_status_t RedisChannel::wait(
 
     while (true)
     {
-        SWSS_LOG_INFO("wait for %s response", command.c_str());
+        SWSS_LOG_DEBUG("wait for %s response", command.c_str());
 
         swss::Selectable *sel;
 
-        int result = s.select(&sel, REDIS_ASIC_STATE_COMMAND_GETRESPONSE_TIMEOUT_MS);
+        int result = s.select(&sel, (int)m_responseTimeoutMs);
 
         if (result == swss::Select::OBJECT)
         {
@@ -184,7 +183,7 @@ sai_status_t RedisChannel::wait(
             const std::string &op = kfvOp(kco);
             const std::string &opkey = kfvKey(kco);
 
-            SWSS_LOG_INFO("response: op = %s, key = %s", opkey.c_str(), op.c_str());
+            SWSS_LOG_DEBUG("response: op = %s, key = %s", opkey.c_str(), op.c_str());
 
             if (op != command)
             {
@@ -210,4 +209,3 @@ sai_status_t RedisChannel::wait(
 
     return SAI_STATUS_FAILURE;
 }
-

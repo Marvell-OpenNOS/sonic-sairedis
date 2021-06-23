@@ -1,8 +1,9 @@
 #include "sai_redis.h"
+#include "ClientServerSai.h"
 
 using namespace sairedis;
 
-std::shared_ptr<Sai> redis_sai = std::make_shared<Sai>();
+std::shared_ptr<SaiInterface> redis_sai = std::make_shared<ClientServerSai>();
 
 sai_status_t sai_api_initialize(
         _In_ uint64_t flags,
@@ -166,4 +167,67 @@ sai_object_id_t sai_switch_id_query(
     SWSS_LOG_ENTER();
 
     return redis_sai->switchIdQuery(objectId);
+}
+
+sai_status_t sai_dbg_generate_dump(
+        _In_ const char *dump_file_name)
+{
+    SWSS_LOG_ENTER();
+
+    return SAI_STATUS_NOT_IMPLEMENTED;
+}
+
+sai_status_t sai_bulk_get_attribute(
+        _In_ sai_object_id_t switch_id,
+        _In_ sai_object_type_t object_type,
+        _In_ uint32_t object_count,
+        _In_ const sai_object_key_t *object_key,
+        _Inout_ uint32_t *attr_count,
+        _Inout_ sai_attribute_t **attr_list,
+        _Inout_ sai_status_t *object_statuses)
+{
+    SWSS_LOG_ENTER();
+
+    return SAI_STATUS_NOT_IMPLEMENTED;
+}
+
+sai_status_t sai_get_maximum_attribute_count(
+        _In_ sai_object_id_t switch_id,
+        _In_ sai_object_type_t object_type,
+        _Out_ uint32_t *count)
+{
+    SWSS_LOG_ENTER();
+
+    return SAI_STATUS_NOT_IMPLEMENTED;
+}
+
+sai_status_t sai_get_object_count(
+        _In_ sai_object_id_t switch_id,
+        _In_ sai_object_type_t object_type,
+        _Out_ uint32_t *count)
+{
+    SWSS_LOG_ENTER();
+
+    return SAI_STATUS_NOT_IMPLEMENTED;
+}
+
+sai_status_t sai_get_object_key(
+        _In_ sai_object_id_t switch_id,
+        _In_ sai_object_type_t object_type,
+        _Inout_ uint32_t *object_count,
+        _Inout_ sai_object_key_t *object_list)
+{
+    SWSS_LOG_ENTER();
+
+    return SAI_STATUS_NOT_IMPLEMENTED;
+}
+
+sai_status_t sai_query_stats_capability(
+        _In_ sai_object_id_t switch_id,
+        _In_ sai_object_type_t object_type,
+        _Inout_ sai_stat_capability_list_t *stats_capability)
+{
+    SWSS_LOG_ENTER();
+
+    return SAI_STATUS_NOT_IMPLEMENTED;
 }

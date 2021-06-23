@@ -180,18 +180,21 @@ namespace saivs
         public: // bulk create ENTRY
 
             SAIVS_VIRTUALSWITCHSAIINTERFACE_DECLARE_BULK_CREATE_ENTRY(fdb_entry);
+            SAIVS_VIRTUALSWITCHSAIINTERFACE_DECLARE_BULK_CREATE_ENTRY(inseg_entry);
             SAIVS_VIRTUALSWITCHSAIINTERFACE_DECLARE_BULK_CREATE_ENTRY(nat_entry);
             SAIVS_VIRTUALSWITCHSAIINTERFACE_DECLARE_BULK_CREATE_ENTRY(route_entry);
 
         public: // bulk remove ENTRY
 
             SAIVS_VIRTUALSWITCHSAIINTERFACE_DECLARE_BULK_REMOVE_ENTRY(fdb_entry);
+            SAIVS_VIRTUALSWITCHSAIINTERFACE_DECLARE_BULK_REMOVE_ENTRY(inseg_entry);
             SAIVS_VIRTUALSWITCHSAIINTERFACE_DECLARE_BULK_REMOVE_ENTRY(nat_entry);
             SAIVS_VIRTUALSWITCHSAIINTERFACE_DECLARE_BULK_REMOVE_ENTRY(route_entry);
 
         public: // bulk set ENTRY
 
             SAIVS_VIRTUALSWITCHSAIINTERFACE_DECLARE_BULK_SET_ENTRY(fdb_entry);
+            SAIVS_VIRTUALSWITCHSAIINTERFACE_DECLARE_BULK_SET_ENTRY(inseg_entry);
             SAIVS_VIRTUALSWITCHSAIINTERFACE_DECLARE_BULK_SET_ENTRY(nat_entry);
             SAIVS_VIRTUALSWITCHSAIINTERFACE_DECLARE_BULK_SET_ENTRY(route_entry);
 
@@ -339,7 +342,10 @@ namespace saivs
                     _In_ sai_object_id_t switch_id,
                     _In_ std::shared_ptr<SwitchConfig> config,
                     _In_ std::shared_ptr<WarmBootState> warmBootState,
-                    _In_ std::weak_ptr<saimeta::Meta> meta);
+                    _In_ std::weak_ptr<saimeta::Meta> meta,
+                    _In_ uint32_t attr_count,
+                    _In_ const sai_attribute_t *attr_list);
+
         private:
 
             static bool doesFdbEntryNotMatchFlushAttr(

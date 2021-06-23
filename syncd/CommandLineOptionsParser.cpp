@@ -1,5 +1,7 @@
 #include "CommandLineOptionsParser.h"
 
+#include "meta/sai_serialize.h"
+
 #include "swss/logger.h"
 
 #include <getopt.h>
@@ -17,12 +19,12 @@ std::shared_ptr<CommandLineOptions> CommandLineOptionsParser::parseCommandLine(
     auto options = std::make_shared<CommandLineOptions>();
 
 #ifdef SAITHRIFT
-    const char* const optstring = "dp:t:g:x:uSUCsrm:h";
+    const char* const optstring = "dp:t:g:x:b:uSUCsz:lrm:h";
 #else
-    const char* const optstring = "dp:t:g:x:uSUCsh";
+    const char* const optstring = "dp:t:g:x:b:uSUCsz:lh";
 #endif // SAITHRIFT
 
-    while(true)
+    while (true)
     {
         static struct option long_options[] =
         {
@@ -34,8 +36,11 @@ std::shared_ptr<CommandLineOptions> CommandLineOptionsParser::parseCommandLine(
             { "enableUnittests",         no_argument,       0, 'U' },
             { "enableConsistencyCheck",  no_argument,       0, 'C' },
             { "syncMode",                no_argument,       0, 's' },
+            { "redisCommunicationMode",  required_argument, 0, 'z' },
+            { "enableSaiBulkSupport",    no_argument,       0, 'l' },
             { "globalContext",           required_argument, 0, 'g' },
             { "contextContig",           required_argument, 0, 'x' },
+            { "breakConfig",             required_argument, 0, 'b' },
 #ifdef SAITHRIFT
             { "rpcserver",               no_argument,       0, 'r' },
             { "portmap",                 required_argument, 0, 'm' },
@@ -90,7 +95,16 @@ std::shared_ptr<CommandLineOptions> CommandLineOptionsParser::parseCommandLine(
                 break;
 
             case 's':
+                SWSS_LOG_WARN("param -s is depreacated, use -z");
                 options->m_enableSyncMode = true;
+                break;
+
+            case 'z':
+                sai_deserialize_redis_communication_mode(optarg, options->m_redisCommunicationMode);
+                break;
+
+            case 'l':
+                options->m_enableSaiBulkSupport = true;
                 break;
 
             case 'g':
@@ -99,6 +113,10 @@ std::shared_ptr<CommandLineOptions> CommandLineOptionsParser::parseCommandLine(
 
             case 'x':
                 options->m_contextConfig = std::string(optarg);
+                break;
+
+            case 'b':
+                options->m_breakConfig = std::string(optarg);
                 break;
 
 #ifdef SAITHRIFT
@@ -133,9 +151,9 @@ void CommandLineOptionsParser::printUsage()
     SWSS_LOG_ENTER();
 
 #ifdef SAITHRIFT
-    std::cout << "Usage: syncd [-d] [-p profile] [-t type] [-u] [-S] [-U] [-C] [-s] [-g idx] [-x contextConfig] [-r] [-m portmap] [-h]" << std::endl;
+    std::cout << "Usage: syncd [-d] [-p profile] [-t type] [-u] [-S] [-U] [-C] [-s] [-z mode] [-l] [-g idx] [-x contextConfig] [-b breakConfig] [-r] [-m portmap] [-h]" << std::endl;
 #else
-    std::cout << "Usage: syncd [-d] [-p profile] [-t type] [-u] [-S] [-U] [-C] [-s] [-g idx] [-x contextConfig] [-h]" << std::endl;
+    std::cout << "Usage: syncd [-d] [-p profile] [-t type] [-u] [-S] [-U] [-C] [-s] [-z mode] [-l] [-g idx] [-x contextConfig] [-b breakConfig] [-h]" << std::endl;
 #endif // SAITHRIFT
 
     std::cout << "    -d --diag" << std::endl;
@@ -153,11 +171,17 @@ void CommandLineOptionsParser::printUsage()
     std::cout << "    -C --enableConsistencyCheck" << std::endl;
     std::cout << "        Enable consisteny check DB vs ASIC after comparison logic" << std::endl;
     std::cout << "    -s --syncMode" << std::endl;
-    std::cout << "        Enable synchronous mode" << std::endl;
+    std::cout << "        Enable synchronous mode (depreacated, use -z)" << std::endl;
+    std::cout << "    -z --redisCommunicationMode" << std::endl;
+    std::cout << "        Redis communication mode (redis_async|redis_sync|zmq_sync), default: redis_async" << std::endl;
+    std::cout << "    -l --enableBulk" << std::endl;
+    std::cout << "        Enable SAI Bulk support" << std::endl;
     std::cout << "    -g --globalContext" << std::endl;
     std::cout << "        Global context index to load from context config file" << std::endl;
     std::cout << "    -x --contextConfig" << std::endl;
     std::cout << "        Context configuration file" << std::endl;
+    std::cout << "    -b --breakConfig" << std::endl;
+    std::cout << "        Comparison logic 'break before make' configuration file" << std::endl;
 
 #ifdef SAITHRIFT
 
@@ -171,4 +195,3 @@ void CommandLineOptionsParser::printUsage()
     std::cout << "    -h --help" << std::endl;
     std::cout << "        Print out this message" << std::endl;
 }
-

@@ -24,6 +24,28 @@ extern "C" {
 #define SAI_KEY_VS_INTERFACE_LANE_MAP_FILE  "SAI_VS_INTERFACE_LANE_MAP_FILE"
 
 /**
+ * @def SAI_KEY_VS_RESOURCE_LIMITER_FILE
+ *
+ * File with resource limitations for object type create.
+ *
+ * Example:
+ * SAI_OBJECT_TYPE_ACL_TABLE=3
+ */
+#define SAI_KEY_VS_RESOURCE_LIMITER_FILE    "SAI_VS_RESOURCE_LIMITER_FILE"
+
+/**
+ * @def SAI_KEY_VS_INTERFACE_FABRIC_LANE_MAP_FILE
+ *
+ * If specified in profile.ini it should point to fabric port to lane map.
+ *
+ * Example:
+ * fabric0:1
+ * fabric1:2
+ *
+ */
+#define SAI_KEY_VS_INTERFACE_FABRIC_LANE_MAP_FILE  "SAI_VS_INTERFACE_FABRIC_LANE_MAP_FILE"
+
+/**
  * @def SAI_KEY_VS_HOSTIF_USE_TAP_DEVICE
  *
  * Bool flag, (true/false). If set to true, then during create host interface
@@ -33,6 +55,36 @@ extern "C" {
  * By default this flag is set to false.
  */
 #define SAI_KEY_VS_HOSTIF_USE_TAP_DEVICE      "SAI_VS_HOSTIF_USE_TAP_DEVICE"
+
+/**
+ * @def SAI_KEY_VS_CORE_PORT_INDEX_MAP_FILE
+ *
+ * For VOQ systems if specified in profile.ini it should point to eth interface to
+ * core and core port index map as port name:core_index,core_port_index
+ *
+ * Example:
+ * eth1:0,1
+ * eth17:1,1
+ *
+ */
+#define SAI_KEY_VS_CORE_PORT_INDEX_MAP_FILE  "SAI_VS_CORE_PORT_INDEX_MAP_FILE"
+
+/**
+ * @brief Context config.
+ *
+ * Optional. Should point to a context_config.json which will contain how many
+ * contexts (syncd) we have in the system globally and each context how many
+ * switches it manages. Only one of this contexts will be used in VS.
+ */
+#define SAI_KEY_VS_CONTEXT_CONFIG             "SAI_VS_CONTEXT_CONFIG"
+
+/**
+ * @brief Global context.
+ *
+ * Optional. Should point to GUID value which is provided in context_config.json
+ * by SAI_KEY_VS_CONTEXT_CONFIG. Default is 0.
+ */
+#define SAI_KEY_VS_GLOBAL_CONTEXT             "SAI_VS_GLOBAL_CONTEXT"
 
 #define SAI_VALUE_VS_SWITCH_TYPE_BCM56850     "SAI_VS_SWITCH_TYPE_BCM56850"
 #define SAI_VALUE_VS_SWITCH_TYPE_BCM81724     "SAI_VS_SWITCH_TYPE_BCM81724"

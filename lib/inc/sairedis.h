@@ -13,6 +13,22 @@ extern "C" {
  */
 #define SAI_REDIS_KEY_CONTEXT_CONFIG              "SAI_REDIS_CONTEXT_CONFIG"
 
+/**
+ * @brief Redis enable client.
+ *
+ * Optional. By default sairedis act as sairedis server, which means it
+ * directly talks to syncd. If this key is set to "true", then this instance of
+ * sairedis will act as a client, and it will connect and talk to sairedis
+ * server instance only.  There can be multiple clients active. Default value
+ * is "false".
+ */
+#define SAI_REDIS_KEY_ENABLE_CLIENT               "SAI_REDIS_ENABLE_CLIENT"
+
+/**
+ * @brief Default synchronous operation response timeout in milliseconds.
+ */
+#define SAI_REDIS_DEFAULT_SYNC_OPERATION_RESPONSE_TIMEOUT (60*1000)
+
 typedef enum _sai_redis_notify_syncd_t
 {
     SAI_REDIS_NOTIFY_SYNCD_INIT_VIEW,
@@ -22,6 +38,36 @@ typedef enum _sai_redis_notify_syncd_t
     SAI_REDIS_NOTIFY_SYNCD_INSPECT_ASIC
 
 } sai_redis_notify_syncd_t;
+
+typedef enum _sai_redis_communication_mode_t
+{
+    /**
+     * @brief Asynchronous mode using Redis DB.
+     */
+    SAI_REDIS_COMMUNICATION_MODE_REDIS_ASYNC,
+
+    /**
+     * @brief Synchronous mode using Redis DB.
+     */
+    SAI_REDIS_COMMUNICATION_MODE_REDIS_SYNC,
+
+    /**
+     * @brief Synchronous mode using ZMQ library.
+     *
+     * When enabled syncd also needs to be running in zmq synchronous mode.
+     * Command pipeline will be disabled when this flag will be set to true.
+     *
+     * This attribute is only introduced to help kick start using synchronous
+     * mode with zmq library. This mode requires some additional configuration
+     * like main channel string and notification channel string. When using
+     * this attribute those channels are set to default values:
+     * "ipc:///tmp/zmq_ep" and "ipc:///tmp/zmq_ntf_ep". To take control of
+     * those values a context config json file must be provided via
+     * SAI_REDIS_KEY_CONTEXT_CONFIG profile argument.
+     */
+    SAI_REDIS_COMMUNICATION_MODE_ZMQ_SYNC,
+
+} sai_redis_communication_mode_t;
 
 typedef enum _sai_redis_switch_attr_t
 {
@@ -113,11 +159,27 @@ typedef enum _sai_redis_switch_attr_t
      * running in synchronous mode. Command pipeline will be disabled when this
      * flag will be set to true.
      *
+     * NOTE: This attribute is deprecated by
+     * SAI_REDIS_SWITCH_ATTR_REDIS_COMMUNICATION_MODE.  When set to true it
+     * will set SAI_REDIS_SWITCH_ATTR_REDIS_COMMUNICATION_MODE to
+     * SAI_REDIS_COMMUNICATION_MODE_REDIS_SYNC.
+     *
+     * TODO: remove this attribute.
+     *
      * @type bool
      * @flags CREATE_AND_SET
      * @default false
      */
     SAI_REDIS_SWITCH_ATTR_SYNC_MODE,
+
+    /**
+     * @brief Redis communication mode.
+     *
+     * @type sai_redis_communication_mode_t
+     * @flags CREATE_AND_SET
+     * @default SAI_REDIS_COMMUNICATION_MODE_REDIS_ASYNC
+     */
+    SAI_REDIS_SWITCH_ATTR_REDIS_COMMUNICATION_MODE,
 
     /**
      * @brief Record statistics counters API calls.
@@ -147,5 +209,28 @@ typedef enum _sai_redis_switch_attr_t
      * @default 0
      */
     SAI_REDIS_SWITCH_ATTR_CONTEXT,
+
+    /**
+     * @brief Recording log filename.
+     *
+     * Default value is sairedis.rec
+     *
+     * @type sai_s8_list_t
+     * @flags CREATE_AND_SET
+     * @default sairedis.rec
+     */
+    SAI_REDIS_SWITCH_ATTR_RECORDING_FILENAME,
+
+    /**
+     * @brief Synchronous operation response timeout in milliseconds.
+     *
+     * Used for every synchronous API call. In asynchronous mode used for GET
+     * operation.
+     *
+     * @type sai_uint64_t
+     * @flags CREATE_AND_SET
+     * @default 60000
+     */
+    SAI_REDIS_SWITCH_ATTR_SYNC_OPERATION_RESPONSE_TIMEOUT,
 
 } sai_redis_switch_attr_t;

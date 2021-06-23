@@ -1,7 +1,3 @@
-#include "swss/table.h"
-#include <vector>
-#include <fstream>
-
 #include "Recorder.h"
 
 #include "meta/sai_serialize.h"
@@ -11,6 +7,8 @@
 #include <inttypes.h>
 
 #include <cstring>
+#include <vector>
+#include <fstream>
 
 using namespace sairedis;
 using namespace saimeta;
@@ -24,12 +22,12 @@ std::vector<swss::FieldValueTuple> serialize_counter_id_list(
         _In_ const sai_stat_id_t *counter_id_list);
 
 #define MUTEX() std::lock_guard<std::mutex> _lock(m_mutex)
-
+#define DEFAULT_RECORDING_FILE_NAME "sairedis.rec"
 Recorder::Recorder()
 {
     SWSS_LOG_ENTER();
 
-    m_recordingFileName = "sairedis.rec";
+    m_recordingFileName = DEFAULT_RECORDING_FILE_NAME;
 
     m_recordingOutputDirectory = ".";
 
@@ -96,6 +94,58 @@ bool Recorder::setRecordingOutputDirectory(
 
     requestLogRotate();
 
+    return true;
+}
+
+bool Recorder::setRecordingFilename(
+    _In_ const sai_attribute_t &attr)
+{
+    SWSS_LOG_ENTER();
+
+    if (attr.value.s8list.count == 0)
+    {
+        m_recordingFileName = DEFAULT_RECORDING_FILE_NAME;
+
+        SWSS_LOG_NOTICE("setting recording filename to default filename: %s", m_recordingFileName.c_str());
+
+        requestLogRotate();
+
+        return true;
+    }
+
+    if (attr.value.s8list.list == NULL)
+    {
+        SWSS_LOG_ERROR("list pointer is NULL");
+
+        return false;
+    }
+
+    size_t len = strnlen((const char *)attr.value.s8list.list, attr.value.s8list.count);
+
+    if (len != (size_t)attr.value.s8list.count)
+    {
+        SWSS_LOG_ERROR("count (%u) is different than strnlen (%zu)", attr.value.s8list.count, len);
+
+        return false;
+    }
+
+    std::string filename((const char*)attr.value.s8list.list, len);
+
+    /// Stop the recording with old file before updating the filename
+    if (m_enabled)
+    {
+        stopRecording();
+    }
+
+    m_recordingFileName = filename;
+
+    SWSS_LOG_NOTICE("setting recording filename : %s", m_recordingFileName.c_str());
+
+    /// Start recording with new file
+    if (m_enabled)
+    {
+         startRecording();
+    }
     return true;
 }
 
@@ -216,7 +266,10 @@ std::string Recorder::getTimestamp()
 
     gettimeofday(&tv, NULL);
 
-    size_t size = strftime(buffer, 32 ,"%Y-%m-%d.%T.", localtime(&tv.tv_sec));
+    struct tm now;
+    localtime_r(&tv.tv_sec, &now);
+
+    size_t size = strftime(buffer, 32, "%Y-%m-%d.%T.", &now);
 
     snprintf(&buffer[size], 32, "%06ld", tv.tv_usec);
 
@@ -282,7 +335,6 @@ void Recorder::recordQueryAttributeCapabilityResponse(
 
     recordLine("Q|attribute_capability|" + sai_serialize_status(status) + "|" + joinFieldValues(arguments));
 }
-
 
 void Recorder::recordQueryAttributeEnumValuesCapability(
         _In_ const std::string& key,
@@ -513,7 +565,6 @@ void Recorder::recordBulkGenericSet(
 
     recordLine("S|" + key + joined);
 }
-
 
 void Recorder::recordBulkGenericSetResponse(
         _In_ sai_status_t status,
@@ -833,7 +884,6 @@ void Recorder::recordRemove(                                            \
     _X(ROUTE_ENTRY,route_entry);            \
     _X(NAT_ENTRY,nat_entry);                \
 
-
 REDIS_DECLARE_EVERY_ENTRY(DECLARE_RECORD_REMOVE_ENTRY)
 
 #define DECLARE_RECORD_CREATE_ENTRY(OT,ot)                                                      \
@@ -939,7 +989,6 @@ void Recorder::recordQueryAttributeCapability(
 
     recordQueryAttributeCapability(key, values);
 }
-
 
 void Recorder::recordQueryAttributeCapabilityResponse(
         _In_ sai_status_t status,

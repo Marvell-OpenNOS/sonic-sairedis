@@ -166,6 +166,8 @@ sai_status_t Sai::create(
         {
             // request to connect to existing switch
 
+            SWSS_LOG_NOTICE("Sai::create call context populateMetadata");
+
             context->populateMetadata(*objectId);
         }
     }
@@ -196,7 +198,29 @@ sai_status_t Sai::set(
 
     if (RedisRemoteSaiInterface::isRedisAttribute(objectType, attr))
     {
+        if (attr->id == SAI_REDIS_SWITCH_ATTR_REDIS_COMMUNICATION_MODE)
+        {
+            // Since communication mode destroys current channel and creates
+            // new one, it may happen, that during this SET api execution when
+            // api mutex is acquired, channel destructor will be blocking on
+            // thread->join() and channel thread will start processing
+            // incoming notification. That notification will be synchronized
+            // with api mutex and will cause deadlock, so to mitigate this
+            // scenario we will unlock api mutex here.
+            //
+            // This is not the perfect, but assuming that communication mode is
+            // changed in single thread and before switch create then we should
+            // not hit race condition.
+
+            SWSS_LOG_NOTICE("unlocking api mutex for communication mode");
+
+            MUTEX_UNLOCK();
+        }
+
         // skip metadata if attribute is redis extension attribute
+
+        // TODO this is setting on all contexts, but maybe we want one specific?
+        // and do set on all if objectId == NULL
 
         bool success = true;
 
@@ -206,7 +230,7 @@ sai_status_t Sai::set(
 
             success &= (status == SAI_STATUS_SUCCESS);
 
-            SWSS_LOG_NOTICE("setting attribute 0x%x status: %s",
+            SWSS_LOG_INFO("setting attribute 0x%x status: %s",
                     attr->id,
                     sai_serialize_status(status).c_str());
         }
@@ -483,6 +507,7 @@ sai_status_t Sai::bulkCreate(                               \
 
 DECLARE_BULK_CREATE_ENTRY(ROUTE_ENTRY,route_entry)
 DECLARE_BULK_CREATE_ENTRY(FDB_ENTRY,fdb_entry);
+DECLARE_BULK_CREATE_ENTRY(INSEG_ENTRY,inseg_entry);
 DECLARE_BULK_CREATE_ENTRY(NAT_ENTRY,nat_entry)
 
 
@@ -508,6 +533,7 @@ sai_status_t Sai::bulkRemove(                               \
 
 DECLARE_BULK_REMOVE_ENTRY(ROUTE_ENTRY,route_entry)
 DECLARE_BULK_REMOVE_ENTRY(FDB_ENTRY,fdb_entry);
+DECLARE_BULK_REMOVE_ENTRY(INSEG_ENTRY,inseg_entry);
 DECLARE_BULK_REMOVE_ENTRY(NAT_ENTRY,nat_entry)
 
 // BULK SET
@@ -534,6 +560,7 @@ sai_status_t Sai::bulkSet(                                  \
 
 DECLARE_BULK_SET_ENTRY(ROUTE_ENTRY,route_entry);
 DECLARE_BULK_SET_ENTRY(FDB_ENTRY,fdb_entry);
+DECLARE_BULK_SET_ENTRY(INSEG_ENTRY,inseg_entry);
 DECLARE_BULK_SET_ENTRY(NAT_ENTRY,nat_entry);
 
 // NON QUAD API
@@ -715,7 +742,7 @@ std::string joinFieldValues(
         const std::string &str_attr_id = fvField(values[i]);
         const std::string &str_attr_value = fvValue(values[i]);
 
-        if(i != 0)
+        if (i != 0)
         {
             ss << "|";
         }

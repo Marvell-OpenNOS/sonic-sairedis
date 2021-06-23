@@ -7,8 +7,6 @@
 
 #include <algorithm>
 
-#define MAX_OBJLIST_LEN 128
-
 #define SAI_VS_MAX_PORTS 1024
 
 using namespace saivs;
@@ -47,6 +45,9 @@ SwitchStateBase::SwitchStateBase(
         if (m_switchConfig->m_useTapDevice)
         {
             m_fdb_info_set = warmBootState->m_fdbInfoSet;
+
+            // TODO populate m_hostif_info_map - need to be able to remove port after warm boot
+            // should be auto populated vs_recreate_hostif_tap_interfaces on create_switch
         }
     }
 }
@@ -154,6 +155,33 @@ sai_status_t SwitchStateBase::create(
         return createHostif(object_id, switch_id, attr_count, attr_list);
     }
 
+    if (object_type == SAI_OBJECT_TYPE_MACSEC_PORT)
+    {
+        sai_object_id_t object_id;
+        sai_deserialize_object_id(serializedObjectId, object_id);
+        return createMACsecPort(object_id, switch_id, attr_count, attr_list);
+    }
+
+    if (object_type == SAI_OBJECT_TYPE_MACSEC_SC)
+    {
+        sai_object_id_t object_id;
+        sai_deserialize_object_id(serializedObjectId, object_id);
+        return createMACsecSC(object_id, switch_id, attr_count, attr_list);
+    }
+
+    if (object_type == SAI_OBJECT_TYPE_MACSEC_SA)
+    {
+        sai_object_id_t object_id;
+        sai_deserialize_object_id(serializedObjectId, object_id);
+        return createMACsecSA(object_id, switch_id, attr_count, attr_list);
+    }
+
+    if (object_type == SAI_OBJECT_TYPE_NEIGHBOR_ENTRY && m_system_port_list.size())
+    {
+        // Neighbor entry programming for VOQ systems
+        return createVoqSystemNeighborEntry(serializedObjectId, switch_id, attr_count, attr_list);
+    }
+
     return create_internal(object_type, serializedObjectId, switch_id, attr_count, attr_list);
 }
 
@@ -167,6 +195,20 @@ sai_status_t SwitchStateBase::create_internal(
     SWSS_LOG_ENTER();
 
     auto &objectHash = m_objectHash.at(object_type);
+
+    if (m_switchConfig->m_resourceLimiter)
+    {
+        size_t limit = m_switchConfig->m_resourceLimiter->getObjectTypeLimit(object_type);
+
+        if (objectHash.size() >= limit)
+        {
+            SWSS_LOG_ERROR("too many %s, created %zu is resource limit",
+                    sai_serialize_object_type(object_type).c_str(),
+                    limit);
+
+            return SAI_STATUS_INSUFFICIENT_RESOURCES;
+        }
+    }
 
     auto it = objectHash.find(serializedObjectId);
 
@@ -334,6 +376,25 @@ sai_status_t SwitchStateBase::remove(
         return removeHostif(objectId);
     }
 
+    if (object_type == SAI_OBJECT_TYPE_MACSEC_PORT)
+    {
+        sai_object_id_t objectId;
+        sai_deserialize_object_id(serializedObjectId, objectId);
+        return removeMACsecPort(objectId);
+    }
+    else if (object_type == SAI_OBJECT_TYPE_MACSEC_SC)
+    {
+        sai_object_id_t objectId;
+        sai_deserialize_object_id(serializedObjectId, objectId);
+        return removeMACsecSC(objectId);
+    }
+    else if (object_type == SAI_OBJECT_TYPE_MACSEC_SA)
+    {
+        sai_object_id_t objectId;
+        sai_deserialize_object_id(serializedObjectId, objectId);
+        return removeMACsecSA(objectId);
+    }
+
     return remove_internal(object_type, serializedObjectId);
 }
 
@@ -419,6 +480,22 @@ sai_status_t SwitchStateBase::setPort(
     return set_internal(SAI_OBJECT_TYPE_PORT, sid, attr);
 }
 
+sai_status_t SwitchStateBase::setAclEntry(
+        _In_ sai_object_id_t entry_id,
+        _In_ const sai_attribute_t* attr)
+{
+    SWSS_LOG_ENTER();
+
+    if (attr && attr->id == SAI_ACL_ENTRY_ATTR_ACTION_MACSEC_FLOW)
+    {
+        return setAclEntryMACsecFlowActive(entry_id, attr);
+    }
+
+    auto sid = sai_serialize_object_id(entry_id);
+
+    return set_internal(SAI_OBJECT_TYPE_ACL_ENTRY, sid, attr);
+}
+
 sai_status_t SwitchStateBase::set(
         _In_ sai_object_type_t objectType,
         _In_ const std::string &serializedObjectId,
@@ -431,6 +508,13 @@ sai_status_t SwitchStateBase::set(
         sai_object_id_t objectId;
         sai_deserialize_object_id(serializedObjectId, objectId);
         return setPort(objectId, attr);
+    }
+
+    if (objectType == SAI_OBJECT_TYPE_ACL_ENTRY)
+    {
+        sai_object_id_t objectId;
+        sai_deserialize_object_id(serializedObjectId, objectId);
+        return setAclEntry(objectId, attr);
     }
 
     return set_internal(objectType, serializedObjectId, attr);
@@ -615,7 +699,143 @@ sai_status_t SwitchStateBase::get(
     return final_status;
 }
 
-static int get_default_gw_mac_address(
+sai_status_t SwitchStateBase::bulkCreate(
+        _In_ sai_object_id_t switch_id,
+        _In_ sai_object_type_t object_type,
+        _In_ const std::vector<std::string> &serialized_object_ids,
+        _In_ const uint32_t *attr_count,
+        _In_ const sai_attribute_t **attr_list,
+        _In_ sai_bulk_op_error_mode_t mode,
+        _Out_ sai_status_t *object_statuses)
+{
+    SWSS_LOG_ENTER();
+
+    uint32_t object_count = (uint32_t) serialized_object_ids.size();
+
+    if (!object_count || !attr_count || !attr_list || !object_statuses)
+    {
+        SWSS_LOG_ERROR("Invalid arguments");
+        return SAI_STATUS_FAILURE;
+    }
+
+    sai_status_t status = SAI_STATUS_SUCCESS;
+    uint32_t it;
+
+    for (it = 0; it < object_count; it++)
+    {
+        object_statuses[it] = create_internal(object_type, serialized_object_ids[it], switch_id, attr_count[it], attr_list[it]);
+
+        if (object_statuses[it] != SAI_STATUS_SUCCESS)
+        {
+            SWSS_LOG_ERROR("Failed to create object with type = %u", object_type);
+
+            status = SAI_STATUS_FAILURE;
+
+            if (mode == SAI_BULK_OP_ERROR_MODE_STOP_ON_ERROR)
+            {
+                break;
+            }
+        }
+    }
+
+    while (++it < object_count)
+    {
+        object_statuses[it] = SAI_STATUS_NOT_EXECUTED;
+    }
+
+    return status;
+}
+
+sai_status_t SwitchStateBase::bulkRemove(
+        _In_ sai_object_type_t object_type,
+        _In_ const std::vector<std::string> &serialized_object_ids,
+        _In_ sai_bulk_op_error_mode_t mode,
+        _Out_ sai_status_t *object_statuses)
+{
+    SWSS_LOG_ENTER();
+
+    uint32_t object_count = (uint32_t) serialized_object_ids.size();
+
+    if (!object_count || !object_statuses)
+    {
+        SWSS_LOG_ERROR("Invalid arguments");
+        return SAI_STATUS_FAILURE;
+    }
+
+    sai_status_t status = SAI_STATUS_SUCCESS;
+    uint32_t it;
+
+    for (it = 0; it < object_count; it++)
+    {
+        object_statuses[it] = remove_internal(object_type, serialized_object_ids[it]);
+
+        if (object_statuses[it] != SAI_STATUS_SUCCESS)
+        {
+            SWSS_LOG_ERROR("Failed to remove object with type = %u", object_type);
+
+            status = SAI_STATUS_FAILURE;
+
+            if (mode == SAI_BULK_OP_ERROR_MODE_STOP_ON_ERROR)
+            {
+                break;
+            }
+        }
+    }
+
+    while (++it < object_count)
+    {
+        object_statuses[it] = SAI_STATUS_NOT_EXECUTED;
+    }
+
+    return status;
+}
+
+sai_status_t SwitchStateBase::bulkSet(
+        _In_ sai_object_type_t object_type,
+        _In_ const std::vector<std::string> &serialized_object_ids,
+        _In_ const sai_attribute_t *attr_list,
+        _In_ sai_bulk_op_error_mode_t mode,
+        _Out_ sai_status_t *object_statuses)
+{
+    SWSS_LOG_ENTER();
+
+    uint32_t object_count = (uint32_t) serialized_object_ids.size();
+
+    if (!object_count || !attr_list || !object_statuses)
+    {
+        SWSS_LOG_ERROR("Invalid arguments");
+        return SAI_STATUS_FAILURE;
+    }
+
+    sai_status_t status = SAI_STATUS_SUCCESS;
+    uint32_t it;
+
+    for (it = 0; it < object_count; it++)
+    {
+        object_statuses[it] = set_internal(object_type, serialized_object_ids[it], &attr_list[it]);
+
+        if (object_statuses[it] != SAI_STATUS_SUCCESS)
+        {
+            SWSS_LOG_ERROR("Failed to set attribute for object with type = %u", object_type);
+
+            status = SAI_STATUS_FAILURE;
+
+            if (mode == SAI_BULK_OP_ERROR_MODE_STOP_ON_ERROR)
+            {
+                break;
+            }
+        }
+    }
+
+    while (++it < object_count)
+    {
+        object_statuses[it] = SAI_STATUS_NOT_EXECUTED;
+    }
+
+    return status;
+}
+
+int SwitchStateBase::get_default_gw_mac_address(
         _Out_ sai_mac_t& mac)
 {
     SWSS_LOG_ENTER();
@@ -679,6 +899,31 @@ sai_status_t SwitchStateBase::set_switch_mac_address()
     return set(SAI_OBJECT_TYPE_SWITCH, m_switch_id, &attr);
 }
 
+sai_status_t SwitchStateBase::set_switch_supported_object_types()
+{
+    SWSS_LOG_ENTER();
+
+    sai_attribute_t attr;
+
+    // Fill this with supported SAI_OBJECT_TYPEs
+    sai_object_type_t supported_obj_list[] = {
+                                SAI_OBJECT_TYPE_PORT,
+                                SAI_OBJECT_TYPE_LAG,
+                                SAI_OBJECT_TYPE_TAM,
+                                SAI_OBJECT_TYPE_TAM_COLLECTOR,
+                                SAI_OBJECT_TYPE_TAM_REPORT,
+                                SAI_OBJECT_TYPE_TAM_TRANSPORT,
+                                SAI_OBJECT_TYPE_TAM_TELEMETRY,
+                                SAI_OBJECT_TYPE_TAM_EVENT_THRESHOLD
+                              };
+
+    attr.id = SAI_SWITCH_ATTR_SUPPORTED_OBJECT_TYPE_LIST;
+    attr.value.s32list.count = sizeof(supported_obj_list)/sizeof(sai_object_type_t);
+    attr.value.s32list.list = (int32_t *) supported_obj_list;
+
+    return set(SAI_OBJECT_TYPE_SWITCH, m_switch_id, &attr);
+}
+
 sai_status_t SwitchStateBase::set_switch_default_attributes()
 {
     SWSS_LOG_ENTER();
@@ -686,21 +931,6 @@ sai_status_t SwitchStateBase::set_switch_default_attributes()
     SWSS_LOG_INFO("create switch default attributes");
 
     sai_attribute_t attr;
-
-    attr.id = SAI_SWITCH_ATTR_AVAILABLE_SNAT_ENTRY;
-    attr.value.u32 = 100;
-
-    CHECK_STATUS(set(SAI_OBJECT_TYPE_SWITCH, m_switch_id, &attr));
-
-    attr.id = SAI_SWITCH_ATTR_AVAILABLE_DNAT_ENTRY;
-    attr.value.u32 = 100;
-
-    CHECK_STATUS(set(SAI_OBJECT_TYPE_SWITCH, m_switch_id, &attr));
-
-    attr.id = SAI_SWITCH_ATTR_AVAILABLE_DOUBLE_NAT_ENTRY;
-    attr.value.u32 = 50; /* Half of single NAT entry */
-
-    CHECK_STATUS(set(SAI_OBJECT_TYPE_SWITCH, m_switch_id, &attr));
 
     attr.id = SAI_SWITCH_ATTR_PORT_STATE_CHANGE_NOTIFY;
     attr.value.ptr = NULL;
@@ -728,6 +958,81 @@ sai_status_t SwitchStateBase::set_switch_default_attributes()
 
     attr.id = SAI_SWITCH_ATTR_WARM_RECOVER;
     attr.value.booldata = false;
+
+    CHECK_STATUS(set(SAI_OBJECT_TYPE_SWITCH, m_switch_id, &attr));
+
+    return set_switch_supported_object_types();
+}
+
+sai_status_t SwitchStateBase::set_static_crm_values()
+{
+    SWSS_LOG_ENTER();
+
+    std::map<sai_switch_attr_t, int> crm_resource_lookup = {
+        { SAI_SWITCH_ATTR_AVAILABLE_IPV4_ROUTE_ENTRY, m_maxIPv4RouteEntries },
+        { SAI_SWITCH_ATTR_AVAILABLE_IPV6_ROUTE_ENTRY, m_maxIPv6RouteEntries },
+        { SAI_SWITCH_ATTR_AVAILABLE_IPV4_NEXTHOP_ENTRY, m_maxIPv4NextHopEntries },
+        { SAI_SWITCH_ATTR_AVAILABLE_IPV6_NEXTHOP_ENTRY, m_maxIPv6NextHopEntries },
+        { SAI_SWITCH_ATTR_AVAILABLE_IPV4_NEIGHBOR_ENTRY, m_maxIPv4NeighborEntries },
+        { SAI_SWITCH_ATTR_AVAILABLE_IPV6_NEIGHBOR_ENTRY, m_maxIPv6NeighborEntries },
+        { SAI_SWITCH_ATTR_AVAILABLE_NEXT_HOP_GROUP_MEMBER_ENTRY, m_maxNextHopGroupMemberEntries },
+        { SAI_SWITCH_ATTR_AVAILABLE_NEXT_HOP_GROUP_ENTRY, m_maxNextHopGroupEntries },
+        { SAI_SWITCH_ATTR_AVAILABLE_FDB_ENTRY, m_maxFdbEntries },
+        { SAI_SWITCH_ATTR_AVAILABLE_SNAT_ENTRY, m_maxSNATEntries },
+        { SAI_SWITCH_ATTR_AVAILABLE_DNAT_ENTRY, m_maxDNATEntries },
+        { SAI_SWITCH_ATTR_AVAILABLE_IPMC_ENTRY, m_maxIPMCEntries },
+        { SAI_SWITCH_ATTR_AVAILABLE_DOUBLE_NAT_ENTRY, m_maxDoubleNATEntries }
+    };
+
+    for (auto const &resource: crm_resource_lookup)
+    {
+        sai_attribute_t attr;
+        attr.id = resource.first;
+        attr.value.u32 = resource.second;
+        CHECK_STATUS(set(SAI_OBJECT_TYPE_SWITCH, m_switch_id, &attr));
+    }
+
+    CHECK_STATUS(set_static_acl_resource_list(SAI_SWITCH_ATTR_AVAILABLE_ACL_TABLE, m_maxAclTables));
+
+    return set_static_acl_resource_list(SAI_SWITCH_ATTR_AVAILABLE_ACL_TABLE_GROUP, m_maxAclTableGroups);
+}
+
+sai_status_t SwitchStateBase::set_static_acl_resource_list(
+        _In_ sai_switch_attr_t acl_resource,
+        _In_ int max_count)
+{
+    SWSS_LOG_ENTER();
+
+    auto acl_stages = {SAI_ACL_STAGE_INGRESS, SAI_ACL_STAGE_EGRESS};
+    auto acl_bind_points = {
+        SAI_ACL_BIND_POINT_TYPE_PORT,
+        SAI_ACL_BIND_POINT_TYPE_LAG,
+        SAI_ACL_BIND_POINT_TYPE_VLAN,
+        SAI_ACL_BIND_POINT_TYPE_ROUTER_INTERFACE,
+        SAI_ACL_BIND_POINT_TYPE_SWITCH
+    };
+
+    std::vector<sai_acl_resource_t> acl_resource_list;
+    for (auto stage: acl_stages)
+    {
+        for (auto bp: acl_bind_points)
+        {
+            sai_acl_resource_t acl_resource_count;
+            acl_resource_count.stage = stage;
+            acl_resource_count.bind_point = bp;
+            acl_resource_count.avail_num = max_count;
+
+            acl_resource_list.push_back(acl_resource_count);
+        }
+    }
+
+    sai_acl_resource_list_t available_acl_resources;
+    available_acl_resources.count = static_cast<uint32_t>(acl_resource_list.size());
+    available_acl_resources.list = acl_resource_list.data();
+
+    sai_attribute_t attr;
+    attr.id = acl_resource;
+    attr.value.aclresource = available_acl_resources;
 
     return set(SAI_OBJECT_TYPE_SWITCH, m_switch_id, &attr);
 }
@@ -1003,7 +1308,7 @@ sai_status_t SwitchStateBase::create_ingress_priority_groups()
 
     SWSS_LOG_INFO("create ingress priority groups");
 
-    for (auto &port_id : m_port_list)
+    for (auto &port_id: m_port_list)
     {
         create_ingress_priority_groups_per_port(port_id);
     }
@@ -1145,6 +1450,16 @@ sai_status_t SwitchStateBase::set_acl_capabilities()
     return set(SAI_OBJECT_TYPE_SWITCH, m_switch_id, &attr);
 }
 
+sai_status_t SwitchStateBase::create_cpu_qos_queues(
+        _In_ sai_object_id_t port_id)
+{
+    SWSS_LOG_ENTER();
+
+    SWSS_LOG_ERROR("implement in child class");
+
+    return SAI_STATUS_NOT_IMPLEMENTED;
+}
+
 sai_status_t SwitchStateBase::create_qos_queues_per_port(
         _In_ sai_object_id_t port_id)
 {
@@ -1193,7 +1508,7 @@ sai_status_t SwitchStateBase::create_scheduler_groups()
 
     // XXX scheduler groups size may change when we will modify sg or ports
 
-    for (auto &port_id : m_port_list)
+    for (auto &port_id: m_port_list)
     {
         CHECK_STATUS(create_scheduler_groups_per_port(port_id));
     }
@@ -1224,7 +1539,9 @@ sai_status_t SwitchStateBase::set_number_of_ecmp_groups()
     return set(SAI_OBJECT_TYPE_SWITCH, m_switch_id, &attr);
 }
 
-sai_status_t SwitchStateBase::initialize_default_objects()
+sai_status_t SwitchStateBase::initialize_default_objects(
+        _In_ uint32_t attr_count,
+        _In_ const sai_attribute_t *attr_list)
 {
     SWSS_LOG_ENTER();
 
@@ -1247,6 +1564,11 @@ sai_status_t SwitchStateBase::initialize_default_objects()
     CHECK_STATUS(set_number_of_ecmp_groups());
     CHECK_STATUS(set_switch_default_attributes());
     CHECK_STATUS(create_scheduler_groups());
+    CHECK_STATUS(set_static_crm_values());
+
+    // Initialize switch for VOQ attributes
+
+    CHECK_STATUS(initialize_voq_switch_objects(attr_count, attr_list));
 
     return SAI_STATUS_SUCCESS;
 }
@@ -1367,10 +1689,18 @@ sai_status_t SwitchStateBase::warm_boot_initialize_objects()
     SWSS_LOG_NOTICE("default bridge port 1q router: %s",
             sai_serialize_object_id(m_default_bridge_port_1q_router).c_str());
 
+    attr.id = SAI_SWITCH_ATTR_CPU_PORT;
+
+    CHECK_STATUS(get(SAI_OBJECT_TYPE_SWITCH, m_switch_id, 1, &attr));
+
+    m_cpu_port_id = attr.value.oid;
+
+    SWSS_LOG_NOTICE("cpu port id: %s",
+            sai_serialize_object_id(m_cpu_port_id).c_str());
+
     // TODO refresh
     //
     // m_bridge_port_list_port_based;
-    // m_cpu_port_id;
     // m_default_1q_bridge;
     // m_default_vlan_id;
     //
@@ -1378,6 +1708,197 @@ sai_status_t SwitchStateBase::warm_boot_initialize_objects()
 
     // TODO update
     // std::unordered_set<uint32_t> m_indices;
+
+    // When booting from older virtual switch (eg. 201811) some attributes
+    // could not be populated at that time, but they can be populated on master
+    // (mostly default values of those attributes) so they will require manual
+    // update after warm boot, for example: SAI_OBJECT_TYPE_QUEUE has no
+    // attributes on 201811 branch but on master there are 3 attributes
+    // populated SAI_QUEUE_ATTR_INDEX, PORT and TYPE. This could be per asic,
+    // so those functions are virtual and could be overridden in child class.
+
+    CHECK_STATUS(warm_update_queues());
+    CHECK_STATUS(warm_update_scheduler_groups());
+    CHECK_STATUS(warm_update_ingress_priority_groups());
+    CHECK_STATUS(warm_update_switch());
+    CHECK_STATUS(warm_update_cpu_queues());
+
+    return SAI_STATUS_SUCCESS;
+}
+
+sai_status_t SwitchStateBase::warm_update_queues()
+{
+    SWSS_LOG_ENTER();
+
+    SWSS_LOG_ERROR("implement in child class");
+
+    return SAI_STATUS_NOT_IMPLEMENTED;
+}
+
+sai_status_t SwitchStateBase::warm_update_scheduler_groups()
+{
+    SWSS_LOG_ENTER();
+
+    for (auto port: m_port_list)
+    {
+        sai_attribute_t attr;
+
+        std::vector<sai_object_id_t> list(MAX_OBJLIST_LEN);
+
+        // get all scheduler list on current port
+
+        attr.id = SAI_PORT_ATTR_QOS_SCHEDULER_GROUP_LIST;
+
+        attr.value.objlist.count = MAX_OBJLIST_LEN;
+        attr.value.objlist.list = list.data();
+
+        CHECK_STATUS(get(SAI_OBJECT_TYPE_PORT, port , 1, &attr));
+
+        list.resize(attr.value.objlist.count);
+
+        for (auto sg: list)
+        {
+            attr.id = SAI_SCHEDULER_GROUP_ATTR_PORT_ID;
+
+            if (get(SAI_OBJECT_TYPE_SCHEDULER_GROUP, sg, 1, &attr) != SAI_STATUS_SUCCESS)
+            {
+                attr.value.oid = port;
+
+                CHECK_STATUS(set(SAI_OBJECT_TYPE_SCHEDULER_GROUP, sg, &attr));
+            }
+        }
+    }
+
+    return SAI_STATUS_SUCCESS;
+}
+
+sai_status_t SwitchStateBase::warm_update_ingress_priority_groups()
+{
+    SWSS_LOG_ENTER();
+
+    for (auto port: m_port_list)
+    {
+        sai_attribute_t attr;
+
+        std::vector<sai_object_id_t> list(MAX_OBJLIST_LEN);
+
+        // get all ingress priority groups list on current port
+
+        attr.id = SAI_PORT_ATTR_INGRESS_PRIORITY_GROUP_LIST;
+
+        attr.value.objlist.count = MAX_OBJLIST_LEN;
+        attr.value.objlist.list = list.data();
+
+        CHECK_STATUS(get(SAI_OBJECT_TYPE_PORT, port , 1, &attr));
+
+        list.resize(attr.value.objlist.count);
+
+        uint8_t index = 0;
+
+        for (auto ipg: list)
+        {
+            attr.id = SAI_INGRESS_PRIORITY_GROUP_ATTR_PORT;
+
+            if (get(SAI_OBJECT_TYPE_INGRESS_PRIORITY_GROUP, ipg, 1, &attr) != SAI_STATUS_SUCCESS)
+            {
+                attr.value.oid = port;
+
+                CHECK_STATUS(set(SAI_OBJECT_TYPE_INGRESS_PRIORITY_GROUP, ipg, &attr));
+            }
+
+            attr.id = SAI_INGRESS_PRIORITY_GROUP_ATTR_BUFFER_PROFILE;
+
+            if (get(SAI_OBJECT_TYPE_INGRESS_PRIORITY_GROUP, ipg, 1, &attr) != SAI_STATUS_SUCCESS)
+            {
+                attr.value.oid = SAI_NULL_OBJECT_ID;
+
+                CHECK_STATUS(set(SAI_OBJECT_TYPE_INGRESS_PRIORITY_GROUP, ipg, &attr));
+            }
+
+            attr.id = SAI_INGRESS_PRIORITY_GROUP_ATTR_INDEX;
+
+            if (get(SAI_OBJECT_TYPE_INGRESS_PRIORITY_GROUP, ipg, 1, &attr) != SAI_STATUS_SUCCESS)
+            {
+                attr.value.u8 = index; // warn, we are guessing index here if it was not defined
+
+                CHECK_STATUS(set(SAI_OBJECT_TYPE_INGRESS_PRIORITY_GROUP, ipg, &attr));
+            }
+
+            index++;
+        }
+    }
+
+    return SAI_STATUS_SUCCESS;
+}
+
+sai_status_t SwitchStateBase::warm_update_switch()
+{
+    SWSS_LOG_ENTER();
+
+    sai_attribute_t attr;
+
+    // check for default available attributes
+
+    attr.id = SAI_SWITCH_ATTR_AVAILABLE_IPV4_ROUTE_ENTRY;
+
+    if (get(SAI_OBJECT_TYPE_SWITCH, m_switch_id, 1, &attr) != SAI_STATUS_SUCCESS)
+    {
+        CHECK_STATUS(set_static_crm_values())
+    }
+
+    // check for default switch type
+
+    attr.id = SAI_SWITCH_ATTR_TYPE;
+
+    if (get(SAI_OBJECT_TYPE_SWITCH, m_switch_id, 1, &attr) != SAI_STATUS_SUCCESS)
+    {
+        attr.value.s32 = SAI_SWITCH_TYPE_NPU;
+
+        CHECK_STATUS(set(SAI_OBJECT_TYPE_SWITCH, m_switch_id, &attr));
+    }
+
+    // check for default acl stages
+
+    attr.id = SAI_SWITCH_ATTR_MAX_ACL_ACTION_COUNT;
+
+    if (get(SAI_OBJECT_TYPE_SWITCH, m_switch_id, 1, &attr) != SAI_STATUS_SUCCESS)
+    {
+        CHECK_STATUS(set_acl_capabilities());
+    }
+
+    // check for default supported object types
+
+    attr.id = SAI_SWITCH_ATTR_SUPPORTED_OBJECT_TYPE_LIST;
+
+    std::vector<sai_object_type_t> objs(MAX_OBJLIST_LEN);
+
+    attr.value.s32list.count = MAX_OBJLIST_LEN;
+    attr.value.s32list.list = (int32_t*)objs.data();
+
+    if (get(SAI_OBJECT_TYPE_SWITCH, m_switch_id, 1, &attr) != SAI_STATUS_SUCCESS)
+    {
+        CHECK_STATUS(set_switch_supported_object_types());
+    }
+
+    return SAI_STATUS_SUCCESS;
+}
+
+sai_status_t SwitchStateBase::warm_update_cpu_queues()
+{
+    SWSS_LOG_ENTER();
+
+    sai_attribute_t attr;
+
+    // check for queues
+
+    attr.id = SAI_PORT_ATTR_QOS_NUMBER_OF_QUEUES;
+
+    if (get(SAI_OBJECT_TYPE_PORT, m_cpu_port_id, 1, &attr) != SAI_STATUS_SUCCESS)
+    {
+        SWSS_LOG_WARN("creating cpu queues");
+
+        CHECK_STATUS(create_cpu_qos_queues(m_cpu_port_id));
+    }
 
     return SAI_STATUS_SUCCESS;
 }
@@ -1464,6 +1985,9 @@ sai_status_t SwitchStateBase::refresh_port_list(
 
     const sai_object_id_t cpu_port_id = attr.value.oid;
 
+    std::unordered_set<sai_object_id_t> fabric_port_set(m_fabric_port_list.begin(),
+                                                        m_fabric_port_list.end());
+
     m_port_list.clear();
 
     // iterate via ASIC state to find all the ports
@@ -1476,6 +2000,10 @@ sai_status_t SwitchStateBase::refresh_port_list(
         // don't put CPU port id on the list
 
         if (port_id == cpu_port_id)
+            continue;
+
+        // don't put fabric ports on the list
+        if (fabric_port_set.find(port_id) != fabric_port_set.end())
             continue;
 
         m_port_list.push_back(port_id);
@@ -1507,6 +2035,44 @@ sai_status_t SwitchStateBase::refresh_port_list(
     CHECK_STATUS(set(SAI_OBJECT_TYPE_SWITCH, m_switch_id, &attr));
 
     SWSS_LOG_NOTICE("refreshed port list, current port number: %zu, not counting cpu port", m_port_list.size());
+
+    return SAI_STATUS_SUCCESS;
+}
+
+sai_status_t SwitchStateBase::refresh_macsec_sci_in_ingress_macsec_acl(
+        _In_ sai_object_id_t object_id)
+{
+    SWSS_LOG_ENTER();
+
+    /*
+     * SAI_MACSEC_ATTR_SCI_IN_INGRESS_MACSEC_ACL indicates the MACsec ASIC capability
+     * of whether SCI can only be used as ACL field.
+     * To set SAI_MACSEC_ATTR_SCI_IN_INGRESS_MACSEC_ACL is always true,
+     * which indicates that here is emulating a kind of MACsec ASIC that use SCI as ACL field.
+     */
+    sai_attribute_t attr;
+    attr.id = SAI_MACSEC_ATTR_SCI_IN_INGRESS_MACSEC_ACL;
+    attr.value.booldata = true;
+
+    CHECK_STATUS(set(SAI_OBJECT_TYPE_MACSEC, object_id, &attr));
+
+    return SAI_STATUS_SUCCESS;
+}
+
+sai_status_t SwitchStateBase::refresh_queue_pause_status(
+        _In_ sai_object_id_t object_id)
+{
+    SWSS_LOG_ENTER();
+
+    // To trigger fake PFC storm on fake Broadcom platform, PFC storm detection
+    // lua requires SAI_QUEUE_ATTR_PAUSE_STATUS field to be present in COUNTERS_DB.
+    // However, the actual value of the attribute does not matter in this regard,
+    // so a dummy one is assigned here.
+    sai_attribute_t attr;
+    attr.id = SAI_QUEUE_ATTR_PAUSE_STATUS;
+    attr.value.booldata = false;
+
+    CHECK_STATUS(set(SAI_OBJECT_TYPE_QUEUE, object_id, &attr));
 
     return SAI_STATUS_SUCCESS;
 }
@@ -1562,9 +2128,32 @@ sai_status_t SwitchStateBase::refresh_read_only(
             case SAI_SWITCH_ATTR_QOS_MAX_NUMBER_OF_CHILDS_PER_SCHEDULER_GROUP:
                 return SAI_STATUS_SUCCESS;
 
+            case SAI_SWITCH_ATTR_AVAILABLE_IPV4_ROUTE_ENTRY:
+            case SAI_SWITCH_ATTR_AVAILABLE_IPV6_ROUTE_ENTRY:
+            case SAI_SWITCH_ATTR_AVAILABLE_IPV4_NEXTHOP_ENTRY:
+            case SAI_SWITCH_ATTR_AVAILABLE_IPV6_NEXTHOP_ENTRY:
+            case SAI_SWITCH_ATTR_AVAILABLE_IPV4_NEIGHBOR_ENTRY:
+            case SAI_SWITCH_ATTR_AVAILABLE_IPV6_NEIGHBOR_ENTRY:
+            case SAI_SWITCH_ATTR_AVAILABLE_NEXT_HOP_GROUP_MEMBER_ENTRY:
+            case SAI_SWITCH_ATTR_AVAILABLE_NEXT_HOP_GROUP_ENTRY:
+            case SAI_SWITCH_ATTR_AVAILABLE_FDB_ENTRY:
+            case SAI_SWITCH_ATTR_AVAILABLE_ACL_TABLE:
+            case SAI_SWITCH_ATTR_AVAILABLE_ACL_TABLE_GROUP:
             case SAI_SWITCH_ATTR_AVAILABLE_SNAT_ENTRY:
             case SAI_SWITCH_ATTR_AVAILABLE_DNAT_ENTRY:
+            case SAI_SWITCH_ATTR_AVAILABLE_IPMC_ENTRY:
             case SAI_SWITCH_ATTR_AVAILABLE_DOUBLE_NAT_ENTRY:
+                return SAI_STATUS_SUCCESS;
+
+            case SAI_SWITCH_ATTR_NUMBER_OF_SYSTEM_PORTS:
+            case SAI_SWITCH_ATTR_SYSTEM_PORT_LIST:
+                return refresh_system_port_list(meta);
+
+            case SAI_SWITCH_ATTR_NUMBER_OF_FABRIC_PORTS:
+            case SAI_SWITCH_ATTR_FABRIC_PORT_LIST:
+                return SAI_STATUS_SUCCESS;
+
+            case SAI_SWITCH_ATTR_SUPPORTED_OBJECT_TYPE_LIST:
                 return SAI_STATUS_SUCCESS;
         }
     }
@@ -1590,6 +2179,19 @@ sai_status_t SwitchStateBase::refresh_read_only(
                  */
 
             case SAI_PORT_ATTR_OPER_STATUS:
+                return SAI_STATUS_SUCCESS;
+
+            case SAI_PORT_ATTR_FABRIC_ATTACHED:
+                return SAI_STATUS_SUCCESS;
+        }
+    }
+
+    if (meta->objecttype == SAI_OBJECT_TYPE_SYSTEM_PORT)
+    {
+        switch (meta->attrid)
+        {
+            case SAI_SYSTEM_PORT_ATTR_TYPE:
+            case SAI_SYSTEM_PORT_ATTR_PORT:
                 return SAI_STATUS_SUCCESS;
         }
     }
@@ -1617,6 +2219,16 @@ sai_status_t SwitchStateBase::refresh_read_only(
     if (meta->objecttype == SAI_OBJECT_TYPE_DEBUG_COUNTER && meta->attrid == SAI_DEBUG_COUNTER_ATTR_INDEX)
     {
         return SAI_STATUS_SUCCESS;
+    }
+
+    if (meta->objecttype == SAI_OBJECT_TYPE_MACSEC && meta->attrid == SAI_MACSEC_ATTR_SCI_IN_INGRESS_MACSEC_ACL)
+    {
+        return refresh_macsec_sci_in_ingress_macsec_acl(object_id);
+    }
+
+    if (meta->objecttype == SAI_OBJECT_TYPE_QUEUE && meta->attrid == SAI_QUEUE_ATTR_PAUSE_STATUS)
+    {
+        return refresh_queue_pause_status(object_id);
     }
 
     auto mmeta = m_meta.lock();
@@ -2206,4 +2818,458 @@ void SwitchStateBase::debugSetStats(
     {
         m_countersMap[key][kvp.first] = kvp.second;
     }
+}
+
+sai_status_t SwitchStateBase::initialize_voq_switch_objects(
+        _In_ uint32_t attr_count,
+        _In_ const sai_attribute_t *attr_list)
+{
+    SWSS_LOG_ENTER();
+
+    bool voq_switch = false;
+    int32_t voq_switch_id = -1;
+    uint32_t voq_max_cores = 0;
+    uint32_t sys_port_count = 0;
+    sai_system_port_config_t *sys_port_cfg_list = NULL;
+
+    for (uint32_t i = 0; i < attr_count; i++)
+    {
+        switch (attr_list[i].id)
+        {
+            case SAI_SWITCH_ATTR_TYPE:
+
+                if (attr_list[i].value.u32 != SAI_SWITCH_TYPE_VOQ)
+                {
+                    // Switch is not being set as VOQ type.
+                    return SAI_STATUS_SUCCESS;
+                }
+                else
+                {
+                    voq_switch = true;
+                }
+
+                break;
+
+            case SAI_SWITCH_ATTR_SWITCH_ID:
+
+                voq_switch_id = (int32_t) attr_list[i].value.u32;
+
+                if (voq_switch_id < 0)
+                {
+                    SWSS_LOG_ERROR("Invalid VOQ switch id %d", voq_switch_id);
+
+                    return (int32_t)SAI_STATUS_INVALID_ATTR_VALUE_0 + (int32_t)i;
+                }
+
+                break;
+
+            case SAI_SWITCH_ATTR_MAX_SYSTEM_CORES:
+
+                voq_max_cores = attr_list[i].value.u32;
+
+                if (voq_max_cores < 1)
+                {
+                    SWSS_LOG_ERROR("Invalid VOQ max system cores %d", voq_max_cores);
+
+                    return (int32_t)SAI_STATUS_INVALID_ATTR_VALUE_0 + (int32_t)i;
+                }
+
+                break;
+
+            case SAI_SWITCH_ATTR_SYSTEM_PORT_CONFIG_LIST:
+
+                sys_port_count = attr_list[i].value.sysportconfiglist.count;
+                sys_port_cfg_list = attr_list[i].value.sysportconfiglist.list;
+
+                if (sys_port_count < 1 || !sys_port_cfg_list)
+                {
+                    SWSS_LOG_ERROR("Invalid voq system port config info! sys port count %d, sys port list %p", sys_port_count, sys_port_cfg_list);
+
+                    return (int32_t)SAI_STATUS_INVALID_ATTR_VALUE_0 + (int32_t)i;
+                }
+
+                break;
+
+            default:
+                // Ignore other attributes. They are processed elsewhere.
+                break;
+        }
+    }
+
+    if (!voq_switch)
+    {
+        // No switch type attribute in the attribute list.
+        return SAI_STATUS_SUCCESS;
+    }
+
+    CHECK_STATUS(create_system_ports(voq_switch_id, sys_port_count, sys_port_cfg_list));
+
+    CHECK_STATUS(set_system_port_list());
+
+    if (m_switchConfig->m_fabricLaneMap)
+    {
+        CHECK_STATUS(create_fabric_ports());
+
+        CHECK_STATUS(set_fabric_port_list());
+    }
+
+    return SAI_STATUS_SUCCESS;
+}
+
+sai_status_t SwitchStateBase::create_system_ports(
+        _In_ int32_t voq_switch_id,
+        _In_ uint32_t sys_port_count,
+        _In_ const sai_system_port_config_t *sys_port_cfg_list)
+{
+    SWSS_LOG_ENTER();
+
+    SWSS_LOG_INFO("create system ports");
+
+    if (!sys_port_cfg_list)
+    {
+        return SAI_STATUS_FAILURE;
+    }
+
+    m_system_port_list.clear();
+
+    for (uint32_t i = 0; i < sys_port_count; i++)
+    {
+        SWSS_LOG_DEBUG("create system port index %u", i);
+
+        sai_object_id_t system_port_id;
+
+        CHECK_STATUS(create(SAI_OBJECT_TYPE_SYSTEM_PORT, &system_port_id, m_switch_id, 0, NULL));
+
+        m_system_port_list.push_back(system_port_id);
+
+        sai_attribute_t attr;
+
+        attr.id = SAI_SYSTEM_PORT_ATTR_CONFIG_INFO;
+        attr.value.sysportconfig = sys_port_cfg_list[i];
+
+        CHECK_STATUS(set(SAI_OBJECT_TYPE_SYSTEM_PORT, system_port_id, &attr));
+
+        attr.id = SAI_SYSTEM_PORT_ATTR_TYPE;
+        attr.value.s32 = SAI_SYSTEM_PORT_TYPE_REMOTE;
+
+        if ((int32_t)sys_port_cfg_list[i].attached_switch_id == voq_switch_id)
+        {
+            attr.value.s32 = SAI_SYSTEM_PORT_TYPE_LOCAL;
+
+            // This is system port of local port. Set the oid of the local port corresponding to this system port
+
+            auto map = m_switchConfig->m_corePortIndexMap;
+
+            if (map)
+            {
+                auto& corePortIndexVector = map->getCorePortIndexVector();
+                size_t n_map = corePortIndexVector.size();
+                size_t idx;
+
+                for (idx = 0; idx < n_map; idx++)
+                {
+                    if (corePortIndexVector[idx][0] == sys_port_cfg_list[i].attached_core_index &&
+                            corePortIndexVector[idx][1] == sys_port_cfg_list[i].attached_core_port_index &&
+                            idx < m_port_list.size())
+                    {
+                        // m_port_list entries are in the same order as lane maps. The core port index maps are in the
+                        // same order as the lane maps. So m_port_list at the index corresponding to the core port index map
+                        // will be the port corresponding to the system port with core port index matching core port index map
+
+                        sai_attribute_t lp_attr;
+
+                        lp_attr.id = SAI_SYSTEM_PORT_ATTR_PORT;
+                        lp_attr.value.oid = m_port_list.at(idx);
+
+                        CHECK_STATUS(set(SAI_OBJECT_TYPE_SYSTEM_PORT, system_port_id, &lp_attr));
+
+                        break;
+                    }
+                }
+
+                if (idx >= n_map)
+                {
+                    SWSS_LOG_ERROR("Core port index not found for system port %d for switch %s. Local port oid is not set!",
+                            sys_port_cfg_list[i].port_id,
+                            sai_serialize_object_id(m_switch_id).c_str());
+                }
+            }
+            else
+            {
+                SWSS_LOG_ERROR("Core port index map for switch %s is NULL. Local port oid is not set for system port %d!",
+                        sai_serialize_object_id(m_switch_id).c_str(),
+                        sys_port_cfg_list[i].port_id);
+            }
+        }
+
+        CHECK_STATUS(set(SAI_OBJECT_TYPE_SYSTEM_PORT, system_port_id, &attr));
+    }
+
+    return SAI_STATUS_SUCCESS;
+}
+
+sai_status_t SwitchStateBase::set_system_port_list()
+{
+    SWSS_LOG_ENTER();
+
+    SWSS_LOG_INFO("set system port list");
+
+    // NOTE: this is static, but will be refreshed on read only get
+
+    sai_attribute_t attr;
+
+    uint32_t sys_port_count = (uint32_t)m_system_port_list.size();
+
+    attr.id = SAI_SWITCH_ATTR_SYSTEM_PORT_LIST;
+    attr.value.objlist.count = sys_port_count;
+    attr.value.objlist.list = m_system_port_list.data();
+
+    CHECK_STATUS(set(SAI_OBJECT_TYPE_SWITCH, m_switch_id, &attr));
+
+    attr.id = SAI_SWITCH_ATTR_NUMBER_OF_SYSTEM_PORTS;
+    attr.value.u32 = sys_port_count;
+
+    return set(SAI_OBJECT_TYPE_SWITCH, m_switch_id, &attr);
+}
+
+sai_status_t SwitchStateBase::refresh_system_port_list(
+        _In_ const sai_attr_metadata_t *meta)
+{
+    SWSS_LOG_ENTER();
+
+    // Currently, system ports info are not changing. So no refresh is done
+
+    // TODO In the future, when dynamic system port config (add/delete) is implemented, re-visit
+
+    return SAI_STATUS_SUCCESS;
+}
+
+sai_status_t SwitchStateBase::create_fabric_ports()
+{
+    SWSS_LOG_ENTER();
+
+    SWSS_LOG_INFO("create fabric ports");
+
+    auto map = m_switchConfig->m_fabricLaneMap;
+
+    if (!map)
+    {
+        SWSS_LOG_ERROR("fabric lane map for switch %s is NULL",
+                sai_serialize_object_id(m_switch_id).c_str());
+
+        return SAI_STATUS_FAILURE;
+    }
+
+    auto& lanesVector = map->getLaneVector();
+
+    uint32_t fabric_port_count = (uint32_t)lanesVector.size();
+
+    m_fabric_port_list.clear();
+
+    for (uint32_t i = 0; i < fabric_port_count; i++)
+    {
+        SWSS_LOG_DEBUG("create fabric port index %u", i);
+
+        sai_object_id_t fabric_port_id;
+
+        CHECK_STATUS(create(SAI_OBJECT_TYPE_PORT, &fabric_port_id, m_switch_id, 0, NULL));
+        m_fabric_port_list.push_back(fabric_port_id);
+
+        sai_attribute_t attr;
+
+        attr.id = SAI_PORT_ATTR_FABRIC_ATTACHED;
+        attr.value.booldata = false;
+
+        CHECK_STATUS(set(SAI_OBJECT_TYPE_PORT, fabric_port_id, &attr));
+
+        std::vector<uint32_t> lanes = lanesVector.at(i);
+
+        attr.id = SAI_PORT_ATTR_HW_LANE_LIST;
+        attr.value.u32list.count = (uint32_t)lanes.size();
+        attr.value.u32list.list = lanes.data();
+
+        CHECK_STATUS(set(SAI_OBJECT_TYPE_PORT, fabric_port_id, &attr));
+
+        attr.id = SAI_PORT_ATTR_TYPE;
+        attr.value.s32 = SAI_PORT_TYPE_FABRIC;
+
+        CHECK_STATUS(set(SAI_OBJECT_TYPE_PORT, fabric_port_id, &attr));
+    }
+
+    return SAI_STATUS_SUCCESS;
+}
+
+sai_status_t SwitchStateBase::set_fabric_port_list()
+{
+    SWSS_LOG_ENTER();
+
+    SWSS_LOG_INFO("set fabric port list");
+
+    sai_attribute_t attr;
+
+    uint32_t fabric_port_count = (uint32_t)m_fabric_port_list.size();
+
+    attr.id = SAI_SWITCH_ATTR_FABRIC_PORT_LIST;
+    attr.value.objlist.count = fabric_port_count;
+    attr.value.objlist.list = m_fabric_port_list.data();
+
+    CHECK_STATUS(set(SAI_OBJECT_TYPE_SWITCH, m_switch_id, &attr));
+
+    attr.id = SAI_SWITCH_ATTR_NUMBER_OF_FABRIC_PORTS;
+    attr.value.u32 = fabric_port_count;
+
+    return set(SAI_OBJECT_TYPE_SWITCH, m_switch_id, &attr);
+}
+
+sai_status_t SwitchStateBase::createVoqSystemNeighborEntry(
+        _In_ const std::string &serializedObjectId,
+        _In_ sai_object_id_t switch_id,
+        _In_ uint32_t attr_count,
+        _In_ const sai_attribute_t *attr_list)
+{
+    SWSS_LOG_ENTER();
+
+    // For VOQ switch, encap index attribute should be set for local neighbors. For
+    // remote neighbors check for presence of encap index supplied from upper layer.
+    // And also validate isLocal and impose encap index flags in the attribute list
+
+    // Determine whether this neighbor is local neighbor or remote neighbor by checking the
+    // RIF id provided. If the port of the RIF is system port, the neighbor is remote neighbor
+
+    bool is_system_neigh = false;
+    sai_attribute_t attr;
+    sai_neighbor_entry_t nbr_entry;
+
+    sai_deserialize_neighbor_entry(serializedObjectId, nbr_entry);
+
+    attr.id = SAI_ROUTER_INTERFACE_ATTR_PORT_ID;
+
+    CHECK_STATUS(get(SAI_OBJECT_TYPE_ROUTER_INTERFACE, nbr_entry.rif_id, 1, &attr));
+
+    if (objectTypeQuery(attr.value.oid) == SAI_OBJECT_TYPE_SYSTEM_PORT)
+    {
+        is_system_neigh = true;
+    }
+
+    uint32_t encap_index = 0;
+    bool impose_encap_index = false;
+    bool is_local = true;
+
+    for (uint32_t i = 0; i < attr_count; i++)
+    {
+        switch (attr_list[i].id)
+        {
+            case SAI_NEIGHBOR_ENTRY_ATTR_ENCAP_INDEX:
+
+                encap_index = attr_list[i].value.u32;
+
+                break;
+
+            case SAI_NEIGHBOR_ENTRY_ATTR_ENCAP_IMPOSE_INDEX:
+
+                impose_encap_index = attr_list[i].value.booldata;
+
+                break;
+
+            case SAI_NEIGHBOR_ENTRY_ATTR_IS_LOCAL:
+
+                is_local = attr_list[i].value.booldata;
+
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    if (impose_encap_index && encap_index == 0)
+    {
+        SWSS_LOG_ERROR("Impose invalid encap index %d for %s neigh %s",
+                encap_index,
+                (is_system_neigh ? "VOQ" : "local"),
+                serializedObjectId.c_str());
+
+        return SAI_STATUS_FAILURE;
+    }
+
+    if (is_system_neigh && is_local)
+    {
+        SWSS_LOG_ERROR("VOQ neigh info mismatch for %s. RIF is remote. attr is_local is true", serializedObjectId.c_str());
+
+        return SAI_STATUS_FAILURE;
+    }
+
+    if (!is_local && encap_index == 0)
+    {
+        SWSS_LOG_ERROR("VOQ neigh info mismatch for %s. attr is_local is false. encap_index is 0", serializedObjectId.c_str());
+
+        return SAI_STATUS_FAILURE;
+    }
+
+    CHECK_STATUS(create_internal(SAI_OBJECT_TYPE_NEIGHBOR_ENTRY, serializedObjectId, switch_id, attr_count, attr_list));
+
+    if (impose_encap_index == false)
+    {
+        // Encap index is not imposed. Assign encap index.
+        // The only requirement for the encap index is it must be locally
+        // unique in asic. Lower 32 bits of the ip address is used as encap index
+
+        encap_index = nbr_entry.ip_address.addr.ip4;
+
+        attr.id = SAI_NEIGHBOR_ENTRY_ATTR_ENCAP_INDEX;
+        attr.value.u32 = encap_index;
+
+        CHECK_STATUS(set_internal(SAI_OBJECT_TYPE_NEIGHBOR_ENTRY, serializedObjectId, &attr));
+    }
+
+    return SAI_STATUS_SUCCESS;
+}
+
+void SwitchStateBase::findObjects(
+        _In_ sai_object_type_t object_type,
+        _In_ const sai_attribute_t &expect,
+        _Out_ std::vector<sai_object_id_t> &objects)
+{
+    SWSS_LOG_ENTER();
+
+    objects.clear();
+
+    SaiAttrWrap expect_wrap(object_type, &expect);
+
+    for (auto &obj : m_objectHash.at(object_type))
+    {
+        auto attr_itr = obj.second.find(expect_wrap.getAttrMetadata()->attridname);
+
+        if (attr_itr != obj.second.end()
+                && attr_itr->second->getAttrStrValue() == expect_wrap.getAttrStrValue())
+        {
+            sai_object_id_t object_id;
+            sai_deserialize_object_id(obj.first, object_id);
+            objects.push_back(object_id);
+        }
+    }
+}
+
+bool SwitchStateBase::dumpObject(
+        _In_ const sai_object_id_t object_id,
+        _Out_ std::vector<sai_attribute_t> &attrs)
+{
+    SWSS_LOG_ENTER();
+
+    attrs.clear();
+
+    auto &objs = m_objectHash.at(objectTypeQuery(object_id));
+    auto obj = objs.find(sai_serialize_object_id(object_id));
+
+    if (obj == objs.end())
+    {
+        return false;
+    }
+
+    for (auto &attr : obj->second)
+    {
+        attrs.push_back(*attr.second->getAttr());
+    }
+
+    return true;
 }

@@ -35,9 +35,9 @@ std::shared_ptr<ContextConfigContainer> ContextConfigContainer::getDefault()
     auto sc = std::make_shared<SwitchConfig>(0, "");
 
     cc->insert(sc);
-    
+
     ccc->m_map[0] = cc;
-    
+
     return ccc;
 }
 
@@ -113,6 +113,15 @@ std::shared_ptr<ContextConfigContainer> ContextConfigContainer::loadFromFile(
 
             auto cc = std::make_shared<ContextConfig>(guid, name, dbAsic, dbCounters, dbFlex, dbState);
 
+            cc->m_zmqEnable = item["zmq_enable"];
+            cc->m_zmqEndpoint = item["zmq_endpoint"];
+            cc->m_zmqNtfEndpoint = item["zmq_ntf_endpoint"];
+
+            SWSS_LOG_NOTICE("contextConfig zmq enable %s, endpoint: %s, ntf endpoint: %s",
+                    (cc->m_zmqEnable) ? "true" : "false",
+                    cc->m_zmqEndpoint.c_str(),
+                    cc->m_zmqNtfEndpoint.c_str());
+
             for (size_t k = 0; k < item["switches"].size(); k++)
             {
                 json& sw = item["switches"][k];
@@ -123,9 +132,13 @@ std::shared_ptr<ContextConfigContainer> ContextConfigContainer::loadFromFile(
                 auto sc = std::make_shared<SwitchConfig>(switchIndex, hwinfo);
 
                 cc->insert(sc);
+
+                SWSS_LOG_NOTICE("insert into context '%s' config for hwinfo '%s'", cc->m_name.c_str(), hwinfo.c_str());
             }
 
             ccc->insert(cc);
+
+            SWSS_LOG_NOTICE("insert context '%s' into container list", cc->m_name.c_str());
         }
     }
     catch (const std::exception& e)
@@ -134,6 +147,8 @@ std::shared_ptr<ContextConfigContainer> ContextConfigContainer::loadFromFile(
 
         return getDefault();
     }
+
+    SWSS_LOG_NOTICE("loaded %zu context configs", ccc->m_map.size());
 
     return ccc;
 }

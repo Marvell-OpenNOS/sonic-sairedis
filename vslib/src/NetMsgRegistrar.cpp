@@ -134,8 +134,6 @@ void NetMsgRegistrar::run()
         }
     }
 
-    // TODO unregister messages when swss common pointer will be advanced
-
     SWSS_LOG_NOTICE("netlink msg listener ended");
 }
 
@@ -151,7 +149,7 @@ void NetMsgRegistrar::onMsg(
 
     if (!m_run)
     {
-        SWSS_LOG_WARN("received message after sropping thread");
+        SWSS_LOG_WARN("received message after stopping thread");
         return;
     }
 

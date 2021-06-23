@@ -27,7 +27,6 @@ extern "C" {
 #include "swss/redisreply.h"
 #include "swss/consumertable.h"
 #include "swss/select.h"
-#include "swss/redisclient.h"
 
 #include <map>
 #include <unordered_map>
@@ -37,22 +36,6 @@ extern "C" {
 
 using namespace syncd;
 
-
-// TODO remove when SAI will introduce bulk APIs to those objects
-sai_status_t sai_bulk_create_fdb_entry(
-        _In_ uint32_t object_count,
-        _In_ const sai_fdb_entry_t *fdb_entry,
-        _In_ const uint32_t *attr_count,
-        _In_ const sai_attribute_t **attr_list,
-        _In_ sai_bulk_op_error_mode_t mode,
-        _Out_ sai_status_t *object_statuses);
-
-sai_status_t sai_bulk_remove_fdb_entry(
-        _In_ uint32_t object_count,
-        _In_ const sai_fdb_entry_t *fdb_entry,
-        _In_ sai_bulk_op_error_mode_t mode,
-        _Out_ sai_status_t *object_statuses);
-
 //static bool g_syncMode;
 
 #define ASSERT_SUCCESS(format,...) \
@@ -60,7 +43,6 @@ sai_status_t sai_bulk_remove_fdb_entry(
         SWSS_LOG_THROW(format ": %s", ##__VA_ARGS__, sai_serialize_status(status).c_str());
 
 using namespace saimeta;
-static std::shared_ptr<swss::RedisClient>   g_redisClient;
 static std::shared_ptr<swss::DBConnector> g_db1;
 
 static sai_next_hop_group_api_t test_next_hop_group_api;
@@ -89,7 +71,6 @@ void clearDB()
 
     g_db1 = std::make_shared<swss::DBConnector>("ASIC_DB", 0, true);
     swss::RedisReply r(g_db1.get(), "FLUSHALL", REDIS_REPLY_STATUS);
-    g_redisClient = std::make_shared<swss::RedisClient>(g_db1.get());
 
     r.checkStatusOK();
 }
@@ -355,10 +336,12 @@ void test_bulk_fdb_create()
 
     sai_switch_api_t *sai_switch_api = NULL;
     sai_lag_api_t *sai_lag_api = NULL;
+    sai_fdb_api_t *sai_fdb_api = NULL;
     sai_bridge_api_t *sai_bridge_api = NULL;
     sai_virtual_router_api_t * sai_virtual_router_api = NULL;
 
     sai_api_query(SAI_API_BRIDGE, (void**)&sai_bridge_api);
+    sai_api_query(SAI_API_FDB, (void**)&sai_fdb_api);
     sai_api_query(SAI_API_LAG, (void**)&sai_lag_api);
     sai_api_query(SAI_API_SWITCH, (void**)&sai_switch_api);
     sai_api_query(SAI_API_VIRTUAL_ROUTER, (void**)&sai_virtual_router_api);
@@ -456,7 +439,7 @@ void test_bulk_fdb_create()
     }
 
     std::vector<sai_status_t> statuses(count);
-    status = sai_bulk_create_fdb_entry(count, fdbs.data(), fdb_attrs_count.data(), (const sai_attribute_t**)fdb_attrs_array.data()
+    status = sai_fdb_api->create_fdb_entries(count, fdbs.data(), fdb_attrs_count.data(), (const sai_attribute_t**)fdb_attrs_array.data()
         , SAI_BULK_OP_ERROR_MODE_IGNORE_ERROR, statuses.data());
     ASSERT_SUCCESS("Failed to create fdb");
     for (size_t j = 0; j < statuses.size(); j++)
@@ -466,7 +449,7 @@ void test_bulk_fdb_create()
     }
 
     // Remove fdb entry
-    status = sai_bulk_remove_fdb_entry(count, fdbs.data(), SAI_BULK_OP_ERROR_MODE_IGNORE_ERROR, statuses.data());
+    status = sai_fdb_api->remove_fdb_entries(count, fdbs.data(), SAI_BULK_OP_ERROR_MODE_IGNORE_ERROR, statuses.data());
     ASSERT_SUCCESS("Failed to bulk remove fdb entry");
 }
 
@@ -783,6 +766,12 @@ void test_bulk_route_create()
 void test_watchdog_timer_clock_rollback()
 {
     SWSS_LOG_ENTER();
+
+    if (getuid() != 0)
+    {
+        SWSS_LOG_WARN("this test requires root for set time");
+        return;
+    }
 
     const int64_t WARN_TIMESPAN_USEC = 30 * 1000000;
     const uint8_t ROLLBACK_TIME_SEC = 5;

@@ -5,6 +5,8 @@
 #include "VirtualObjectIdManager.h"
 #include "SkipRecordAttrContainer.h"
 #include "SwitchContainer.h"
+#include "ZeroMQChannel.h"
+#include "PerformanceIntervalTimer.h"
 
 #include "sairediscommon.h"
 
@@ -15,6 +17,7 @@
 
 using namespace sairedis;
 using namespace saimeta;
+using namespace sairediscommon;
 using namespace std::placeholders;
 
 std::string joinFieldValues(
@@ -26,16 +29,13 @@ std::vector<swss::FieldValueTuple> serialize_counter_id_list(
         _In_ const sai_stat_id_t *counter_id_list);
 
 RedisRemoteSaiInterface::RedisRemoteSaiInterface(
-        _In_ uint32_t globalContext,
-        _In_ std::shared_ptr<SwitchConfigContainer> scc,
-        _In_ const std::string& dbAsic,
+        _In_ std::shared_ptr<ContextConfig> contextConfig,
         _In_ std::function<sai_switch_notifications_t(std::shared_ptr<Notification>)> notificationCallback,
         _In_ std::shared_ptr<Recorder> recorder):
-    m_globalContext(globalContext),
-    m_switchConfigContainer(scc),
+    m_contextConfig(contextConfig),
+    m_redisCommunicationMode(SAI_REDIS_COMMUNICATION_MODE_REDIS_ASYNC),
     m_recorder(recorder),
-    m_notificationCallback(notificationCallback),
-    m_dbAsic(dbAsic)
+    m_notificationCallback(notificationCallback)
 {
     SWSS_LOG_ENTER();
 
@@ -72,14 +72,31 @@ sai_status_t RedisRemoteSaiInterface::initialize(
     m_asicInitViewMode = false; // default mode is apply mode
     m_useTempView = false;
     m_syncMode = false;
+    m_redisCommunicationMode = SAI_REDIS_COMMUNICATION_MODE_REDIS_ASYNC;
 
-    m_redisChannel = std::make_shared<RedisChannel>(
-            m_dbAsic,
-            std::bind(&RedisRemoteSaiInterface::handleNotification, this, _1, _2, _3));
+    if (m_contextConfig->m_zmqEnable)
+    {
+        m_communicationChannel = std::make_shared<ZeroMQChannel>(
+                m_contextConfig->m_zmqEndpoint,
+                m_contextConfig->m_zmqNtfEndpoint,
+                std::bind(&RedisRemoteSaiInterface::handleNotification, this, _1, _2, _3));
 
-    auto db = m_redisChannel->getDbConnector();
+        SWSS_LOG_NOTICE("zmq enabled, forcing sync mode");
 
-    m_redisVidIndexGenerator = std::make_shared<RedisVidIndexGenerator>(db, REDIS_KEY_VIDCOUNTER);
+        m_syncMode = true;
+    }
+    else
+    {
+        m_communicationChannel = std::make_shared<RedisChannel>(
+                m_contextConfig->m_dbAsic,
+                std::bind(&RedisRemoteSaiInterface::handleNotification, this, _1, _2, _3));
+    }
+
+    m_responseTimeoutMs = m_communicationChannel->getResponseTimeout();
+
+    m_db = std::make_shared<swss::DBConnector>(m_contextConfig->m_dbAsic, 0);
+
+    m_redisVidIndexGenerator = std::make_shared<RedisVidIndexGenerator>(m_db, REDIS_KEY_VIDCOUNTER);
 
     clear_local_state();
 
@@ -103,7 +120,7 @@ sai_status_t RedisRemoteSaiInterface::uninitialize(void)
         return SAI_STATUS_FAILURE;
     }
 
-    m_redisChannel = nullptr; // will stop thread
+    m_communicationChannel = nullptr; // will stop thread
 
     // clear local state after stopping threads
 
@@ -116,9 +133,10 @@ sai_status_t RedisRemoteSaiInterface::uninitialize(void)
     return SAI_STATUS_SUCCESS;
 }
 
+// TODO move to common namespace utils class
 std::string RedisRemoteSaiInterface::getHardwareInfo(
         _In_ uint32_t attrCount,
-        _In_ const sai_attribute_t *attrList) const
+        _In_ const sai_attribute_t *attrList)
 {
     SWSS_LOG_ENTER();
 
@@ -158,7 +176,6 @@ std::string RedisRemoteSaiInterface::getHardwareInfo(
      return std::string((const char*)s8list.list, actualLength);
 }
 
-
 sai_status_t RedisRemoteSaiInterface::create(
         _In_ sai_object_type_t objectType,
         _Out_ sai_object_id_t* objectId,
@@ -195,6 +212,14 @@ sai_status_t RedisRemoteSaiInterface::create(
 
         if (attr && attr->value.booldata == false)
         {
+            if (m_switchContainer->contains(*objectId))
+            {
+                SWSS_LOG_NOTICE("switch container already contains switch %s",
+                        sai_serialize_object_id(*objectId).c_str());
+
+                return SAI_STATUS_SUCCESS;
+            }
+
             refreshTableDump();
 
             if (m_tableDump.find(switchId) == m_tableDump.end())
@@ -340,18 +365,115 @@ sai_status_t RedisRemoteSaiInterface::setRedisExtensionAttribute(
 
             return SAI_STATUS_SUCCESS;
 
+        case SAI_REDIS_SWITCH_ATTR_SYNC_OPERATION_RESPONSE_TIMEOUT:
+
+            m_responseTimeoutMs = attr->value.u64;
+
+            m_communicationChannel->setResponseTimeout(m_responseTimeoutMs);
+
+            SWSS_LOG_NOTICE("set response timeout to %lu ms", m_responseTimeoutMs);
+
+            return SAI_STATUS_SUCCESS;
+
         case SAI_REDIS_SWITCH_ATTR_SYNC_MODE:
 
+            SWSS_LOG_WARN("sync mode is depreacated, use communication mode");
+
             m_syncMode = attr->value.booldata;
+
+            if (m_contextConfig->m_zmqEnable)
+            {
+                SWSS_LOG_NOTICE("zmq enabled, forcing sync mode");
+
+                m_syncMode = true;
+            }
 
             if (m_syncMode)
             {
                 SWSS_LOG_NOTICE("disabling buffered pipeline in sync mode");
 
-                m_redisChannel->setBuffered(false);
+                m_communicationChannel->setBuffered(false);
             }
 
             return SAI_STATUS_SUCCESS;
+
+        case SAI_REDIS_SWITCH_ATTR_REDIS_COMMUNICATION_MODE:
+
+            m_redisCommunicationMode = (sai_redis_communication_mode_t)attr->value.s32;
+
+            if (m_contextConfig->m_zmqEnable)
+            {
+                SWSS_LOG_NOTICE("zmq enabled via context config");
+
+                m_redisCommunicationMode = SAI_REDIS_COMMUNICATION_MODE_ZMQ_SYNC;
+            }
+
+            m_communicationChannel = nullptr;
+
+            switch (m_redisCommunicationMode)
+            {
+                case SAI_REDIS_COMMUNICATION_MODE_REDIS_ASYNC:
+
+                    SWSS_LOG_NOTICE("enabling redis async mode");
+
+                    m_syncMode = false;
+
+                    m_communicationChannel = std::make_shared<RedisChannel>(
+                            m_contextConfig->m_dbAsic,
+                            std::bind(&RedisRemoteSaiInterface::handleNotification, this, _1, _2, _3));
+
+                    m_communicationChannel->setResponseTimeout(m_responseTimeoutMs);
+
+                    m_communicationChannel->setBuffered(true);
+
+                    return SAI_STATUS_SUCCESS;
+
+                case SAI_REDIS_COMMUNICATION_MODE_REDIS_SYNC:
+
+                    SWSS_LOG_NOTICE("enabling redis sync mode");
+
+                    m_syncMode = true;
+
+                    m_communicationChannel = std::make_shared<RedisChannel>(
+                            m_contextConfig->m_dbAsic,
+                            std::bind(&RedisRemoteSaiInterface::handleNotification, this, _1, _2, _3));
+
+                    m_communicationChannel->setResponseTimeout(m_responseTimeoutMs);
+
+                    m_communicationChannel->setBuffered(false);
+
+                    return SAI_STATUS_SUCCESS;
+
+                case SAI_REDIS_COMMUNICATION_MODE_ZMQ_SYNC:
+
+                    m_contextConfig->m_zmqEnable = true;
+
+                    // main communication channel was created at initialize method
+                    // so this command will replace it with zmq channel
+
+                    m_communicationChannel = std::make_shared<ZeroMQChannel>(
+                            m_contextConfig->m_zmqEndpoint,
+                            m_contextConfig->m_zmqNtfEndpoint,
+                            std::bind(&RedisRemoteSaiInterface::handleNotification, this, _1, _2, _3));
+
+                    m_communicationChannel->setResponseTimeout(m_responseTimeoutMs);
+
+                    SWSS_LOG_NOTICE("zmq enabled, forcing sync mode");
+
+                    m_syncMode = true;
+
+                    SWSS_LOG_NOTICE("disabling buffered pipeline in sync mode");
+
+                    m_communicationChannel->setBuffered(false);
+
+                    return SAI_STATUS_SUCCESS;
+
+                default:
+
+                    SWSS_LOG_ERROR("invalid communication mode value: %d", m_redisCommunicationMode);
+
+                    return SAI_STATUS_NOT_SUPPORTED;
+            }
 
         case SAI_REDIS_SWITCH_ATTR_USE_PIPELINE:
 
@@ -362,13 +484,13 @@ sai_status_t RedisRemoteSaiInterface::setRedisExtensionAttribute(
                 return SAI_STATUS_NOT_SUPPORTED;
             }
 
-            m_redisChannel->setBuffered(attr->value.booldata);
+            m_communicationChannel->setBuffered(attr->value.booldata);
 
             return SAI_STATUS_SUCCESS;
 
         case SAI_REDIS_SWITCH_ATTR_FLUSH:
 
-            m_redisChannel->flush();
+            m_communicationChannel->flush();
 
             return SAI_STATUS_SUCCESS;
 
@@ -381,6 +503,15 @@ sai_status_t RedisRemoteSaiInterface::setRedisExtensionAttribute(
 
             return SAI_STATUS_SUCCESS;
 
+        case SAI_REDIS_SWITCH_ATTR_RECORDING_FILENAME:
+
+            if (m_recorder)
+            {
+                m_recorder->setRecordingFilename(*attr);
+            }
+
+            return SAI_STATUS_SUCCESS;
+            
         default:
             break;
     }
@@ -538,7 +669,7 @@ sai_status_t RedisRemoteSaiInterface::create(
 
     m_recorder->recordGenericCreate(key, entry);
 
-    m_redisChannel->set(key, entry, REDIS_ASIC_STATE_COMMAND_CREATE);
+    m_communicationChannel->set(key, entry, REDIS_ASIC_STATE_COMMAND_CREATE);
 
     auto status = waitForResponse(SAI_COMMON_API_CREATE);
 
@@ -561,7 +692,7 @@ sai_status_t RedisRemoteSaiInterface::remove(
 
     m_recorder->recordGenericRemove(key);
 
-    m_redisChannel->del(key, REDIS_ASIC_STATE_COMMAND_REMOVE);
+    m_communicationChannel->del(key, REDIS_ASIC_STATE_COMMAND_REMOVE);
 
     auto status = waitForResponse(SAI_COMMON_API_REMOVE);
 
@@ -591,7 +722,7 @@ sai_status_t RedisRemoteSaiInterface::set(
 
     m_recorder->recordGenericSet(key, entry);
 
-    m_redisChannel->set(key, entry, REDIS_ASIC_STATE_COMMAND_SET);
+    m_communicationChannel->set(key, entry, REDIS_ASIC_STATE_COMMAND_SET);
 
     auto status = waitForResponse(SAI_COMMON_API_SET);
 
@@ -609,7 +740,7 @@ sai_status_t RedisRemoteSaiInterface::waitForResponse(
     {
         swss::KeyOpFieldsValuesTuple kco;
 
-        auto status = m_redisChannel->wait(REDIS_ASIC_STATE_COMMAND_GETRESPONSE, kco);
+        auto status = m_communicationChannel->wait(REDIS_ASIC_STATE_COMMAND_GETRESPONSE, kco);
 
         return status;
     }
@@ -631,18 +762,28 @@ sai_status_t RedisRemoteSaiInterface::waitForGetResponse(
 
     swss::KeyOpFieldsValuesTuple kco;
 
-    auto status = m_redisChannel->wait(REDIS_ASIC_STATE_COMMAND_GETRESPONSE, kco);
+    auto status = m_communicationChannel->wait(REDIS_ASIC_STATE_COMMAND_GETRESPONSE, kco);
 
     auto &values = kfvFieldsValues(kco);
 
     if (status == SAI_STATUS_SUCCESS)
     {
+        if (values.size() == 0)
+        {
+            SWSS_LOG_THROW("logic error, get response returned 0 values!, send api response or sync/async issue?");
+        }
+
         SaiAttributeList list(objectType, values, false);
 
         transfer_attributes(objectType, attr_count, list.get_attr_list(), attr_list, false);
     }
     else if (status == SAI_STATUS_BUFFER_OVERFLOW)
     {
+        if (values.size() == 0)
+        {
+            SWSS_LOG_THROW("logic error, get response returned 0 values!, send api response or sync/async issue?");
+        }
+
         SaiAttributeList list(objectType, values, true);
 
         // no need for id fix since this is overflow
@@ -685,7 +826,7 @@ sai_status_t RedisRemoteSaiInterface::get(
 
     // get is special, it will not put data
     // into asic view, only to message queue
-    m_redisChannel->set(key, entry, REDIS_ASIC_STATE_COMMAND_GET);
+    m_communicationChannel->set(key, entry, REDIS_ASIC_STATE_COMMAND_GET);
 
     auto status = waitForGetResponse(objectType, attr_count, attr_list);
 
@@ -726,7 +867,7 @@ sai_status_t RedisRemoteSaiInterface::waitForFlushFdbEntriesResponse()
 
     swss::KeyOpFieldsValuesTuple kco;
 
-    auto status = m_redisChannel->wait(REDIS_ASIC_STATE_COMMAND_FLUSHRESPONSE, kco);
+    auto status = m_communicationChannel->wait(REDIS_ASIC_STATE_COMMAND_FLUSHRESPONSE, kco);
 
     return status;
 }
@@ -754,7 +895,7 @@ sai_status_t RedisRemoteSaiInterface::flushFdbEntries(
     m_recorder->recordFlushFdbEntries(switchId, attrCount, attrList);
    // TODO m_recorder->recordFlushFdbEntries(key, entry)
 
-    m_redisChannel->set(key, entry, REDIS_ASIC_STATE_COMMAND_FLUSH);
+    m_communicationChannel->set(key, entry, REDIS_ASIC_STATE_COMMAND_FLUSH);
 
     auto status = waitForFlushFdbEntriesResponse();
 
@@ -790,7 +931,7 @@ sai_status_t RedisRemoteSaiInterface::objectTypeGetAvailability(
 
     // This query will not put any data into the ASIC view, just into the
     // message queue
-    m_redisChannel->set(strSwitchId, entry, REDIS_ASIC_STATE_COMMAND_OBJECT_TYPE_GET_AVAILABILITY_QUERY);
+    m_communicationChannel->set(strSwitchId, entry, REDIS_ASIC_STATE_COMMAND_OBJECT_TYPE_GET_AVAILABILITY_QUERY);
 
     auto status = waitForObjectTypeGetAvailabilityResponse(count);
 
@@ -806,7 +947,7 @@ sai_status_t RedisRemoteSaiInterface::waitForObjectTypeGetAvailabilityResponse(
 
     swss::KeyOpFieldsValuesTuple kco;
 
-    auto status = m_redisChannel->wait(REDIS_ASIC_STATE_COMMAND_OBJECT_TYPE_GET_AVAILABILITY_RESPONSE, kco);
+    auto status = m_communicationChannel->wait(REDIS_ASIC_STATE_COMMAND_OBJECT_TYPE_GET_AVAILABILITY_RESPONSE, kco);
 
     if (status == SAI_STATUS_SUCCESS)
     {
@@ -866,7 +1007,7 @@ sai_status_t RedisRemoteSaiInterface::queryAttributeCapability(
 
     m_recorder->recordQueryAttributeCapability(switchId, objectType, attrId, capability);
 
-    m_redisChannel->set(switchIdStr, entry, REDIS_ASIC_STATE_COMMAND_ATTR_CAPABILITY_QUERY);
+    m_communicationChannel->set(switchIdStr, entry, REDIS_ASIC_STATE_COMMAND_ATTR_CAPABILITY_QUERY);
 
     auto status = waitForQueryAttributeCapabilityResponse(capability);
 
@@ -882,7 +1023,7 @@ sai_status_t RedisRemoteSaiInterface::waitForQueryAttributeCapabilityResponse(
 
     swss::KeyOpFieldsValuesTuple kco;
 
-    auto status = m_redisChannel->wait(REDIS_ASIC_STATE_COMMAND_ATTR_CAPABILITY_RESPONSE, kco);
+    auto status = m_communicationChannel->wait(REDIS_ASIC_STATE_COMMAND_ATTR_CAPABILITY_RESPONSE, kco);
 
     if (status == SAI_STATUS_SUCCESS)
     {
@@ -955,7 +1096,7 @@ sai_status_t RedisRemoteSaiInterface::queryAattributeEnumValuesCapability(
 
     m_recorder->recordQueryAattributeEnumValuesCapability(switchId, objectType, attrId, enumValuesCapability);
 
-    m_redisChannel->set(switch_id_str, entry, REDIS_ASIC_STATE_COMMAND_ATTR_ENUM_VALUES_CAPABILITY_QUERY);
+    m_communicationChannel->set(switch_id_str, entry, REDIS_ASIC_STATE_COMMAND_ATTR_ENUM_VALUES_CAPABILITY_QUERY);
 
     auto status = waitForQueryAattributeEnumValuesCapabilityResponse(enumValuesCapability);
 
@@ -971,7 +1112,7 @@ sai_status_t RedisRemoteSaiInterface::waitForQueryAattributeEnumValuesCapability
 
     swss::KeyOpFieldsValuesTuple kco;
 
-    auto status = m_redisChannel->wait(REDIS_ASIC_STATE_COMMAND_ATTR_ENUM_VALUES_CAPABILITY_RESPONSE, kco);
+    auto status = m_communicationChannel->wait(REDIS_ASIC_STATE_COMMAND_ATTR_ENUM_VALUES_CAPABILITY_RESPONSE, kco);
 
     if (status == SAI_STATUS_SUCCESS)
     {
@@ -987,7 +1128,7 @@ sai_status_t RedisRemoteSaiInterface::waitForQueryAattributeEnumValuesCapability
         const std::string &capability_str = fvValue(values[0]);
         const uint32_t num_capabilities = std::stoi(fvValue(values[1]));
 
-        SWSS_LOG_DEBUG("Received payload: capabilites = '%s', count = %d", capability_str.c_str(), num_capabilities);
+        SWSS_LOG_DEBUG("Received payload: capabilities = '%s', count = %d", capability_str.c_str(), num_capabilities);
 
         enumValuesCapability->count = num_capabilities;
 
@@ -1004,7 +1145,7 @@ sai_status_t RedisRemoteSaiInterface::waitForQueryAattributeEnumValuesCapability
             {
                 if (num_capabilities != i + 1)
                 {
-                    SWSS_LOG_WARN("Query returned less attributes than expected: expected %d, recieved %d", num_capabilities, i+1);
+                    SWSS_LOG_WARN("Query returned less attributes than expected: expected %d, received %d", num_capabilities, i+1);
                 }
 
                 break;
@@ -1045,7 +1186,7 @@ sai_status_t RedisRemoteSaiInterface::getStats(
 
     // get_stats will not put data to asic view, only to message queue
 
-    m_redisChannel->set(key, entry, REDIS_ASIC_STATE_COMMAND_GET_STATS);
+    m_communicationChannel->set(key, entry, REDIS_ASIC_STATE_COMMAND_GET_STATS);
 
     return waitForGetStatsResponse(number_of_counters, counters);
 }
@@ -1058,7 +1199,7 @@ sai_status_t RedisRemoteSaiInterface::waitForGetStatsResponse(
 
     swss::KeyOpFieldsValuesTuple kco;
 
-    auto status = m_redisChannel->wait(REDIS_ASIC_STATE_COMMAND_GETRESPONSE, kco);
+    auto status = m_communicationChannel->wait(REDIS_ASIC_STATE_COMMAND_GETRESPONSE, kco);
 
     if (status == SAI_STATUS_SUCCESS)
     {
@@ -1117,7 +1258,7 @@ sai_status_t RedisRemoteSaiInterface::clearStats(
 
     m_recorder->recordGenericClearStats(object_type, object_id, number_of_counters, counter_ids);
 
-    m_redisChannel->set(key, values, REDIS_ASIC_STATE_COMMAND_CLEAR_STATS);
+    m_communicationChannel->set(key, values, REDIS_ASIC_STATE_COMMAND_CLEAR_STATS);
 
     auto status = waitForClearStatsResponse();
 
@@ -1132,7 +1273,7 @@ sai_status_t RedisRemoteSaiInterface::waitForClearStatsResponse()
 
     swss::KeyOpFieldsValuesTuple kco;
 
-    auto status = m_redisChannel->wait(REDIS_ASIC_STATE_COMMAND_GETRESPONSE, kco);
+    auto status = m_communicationChannel->wait(REDIS_ASIC_STATE_COMMAND_GETRESPONSE, kco);
 
     return status;
 }
@@ -1174,7 +1315,7 @@ sai_status_t RedisRemoteSaiInterface::bulkRemove(
 
     m_recorder->recordBulkGenericRemove(serializedObjectType, entries);
 
-    m_redisChannel->set(key, entries, REDIS_ASIC_STATE_COMMAND_BULK_REMOVE);
+    m_communicationChannel->set(key, entries, REDIS_ASIC_STATE_COMMAND_BULK_REMOVE);
 
     return waitForBulkResponse(SAI_COMMON_API_BULK_REMOVE, (uint32_t)serialized_object_ids.size(), object_statuses);
 }
@@ -1190,7 +1331,7 @@ sai_status_t RedisRemoteSaiInterface::waitForBulkResponse(
     {
         swss::KeyOpFieldsValuesTuple kco;
 
-        auto status = m_redisChannel->wait(REDIS_ASIC_STATE_COMMAND_GETRESPONSE, kco);
+        auto status = m_communicationChannel->wait(REDIS_ASIC_STATE_COMMAND_GETRESPONSE, kco);
 
         auto &values = kfvFieldsValues(kco);
 
@@ -1279,6 +1420,24 @@ sai_status_t RedisRemoteSaiInterface::bulkRemove(
 
 sai_status_t RedisRemoteSaiInterface::bulkRemove(
         _In_ uint32_t object_count,
+        _In_ const sai_inseg_entry_t *inseg_entry,
+        _In_ sai_bulk_op_error_mode_t mode,
+        _Out_ sai_status_t *object_statuses)
+{
+    SWSS_LOG_ENTER();
+
+    std::vector<std::string> serializedObjectIds;
+
+    for (uint32_t idx = 0; idx < object_count; idx++)
+    {
+        serializedObjectIds.emplace_back(sai_serialize_inseg_entry(inseg_entry[idx]));
+    }
+
+    return bulkRemove(SAI_OBJECT_TYPE_INSEG_ENTRY, serializedObjectIds, mode, object_statuses);
+}
+
+sai_status_t RedisRemoteSaiInterface::bulkRemove(
+        _In_ uint32_t object_count,
         _In_ const sai_fdb_entry_t *fdb_entry,
         _In_ sai_bulk_op_error_mode_t mode,
         _Out_ sai_status_t *object_statuses)
@@ -1355,6 +1514,25 @@ sai_status_t RedisRemoteSaiInterface::bulkSet(
 
 sai_status_t RedisRemoteSaiInterface::bulkSet(
         _In_ uint32_t object_count,
+        _In_ const sai_inseg_entry_t *inseg_entry,
+        _In_ const sai_attribute_t *attr_list,
+        _In_ sai_bulk_op_error_mode_t mode,
+        _Out_ sai_status_t *object_statuses)
+{
+    SWSS_LOG_ENTER();
+
+    std::vector<std::string> serializedObjectIds;
+
+    for (uint32_t idx = 0; idx < object_count; idx++)
+    {
+        serializedObjectIds.emplace_back(sai_serialize_inseg_entry(inseg_entry[idx]));
+    }
+
+    return bulkSet(SAI_OBJECT_TYPE_INSEG_ENTRY, serializedObjectIds, attr_list, mode, object_statuses);
+}
+
+sai_status_t RedisRemoteSaiInterface::bulkSet(
+        _In_ uint32_t object_count,
         _In_ const sai_fdb_entry_t *fdb_entry,
         _In_ const sai_attribute_t *attr_list,
         _In_ sai_bulk_op_error_mode_t mode,
@@ -1407,7 +1585,7 @@ sai_status_t RedisRemoteSaiInterface::bulkSet(
 
     m_recorder->recordBulkGenericSet(serializedObjectType, entries);
 
-    m_redisChannel->set(key, entries, REDIS_ASIC_STATE_COMMAND_BULK_SET);
+    m_communicationChannel->set(key, entries, REDIS_ASIC_STATE_COMMAND_BULK_SET);
 
     return waitForBulkResponse(SAI_COMMON_API_BULK_SET, (uint32_t)serialized_object_ids.size(), object_statuses);
 }
@@ -1506,7 +1684,7 @@ sai_status_t RedisRemoteSaiInterface::bulkCreate(
 
     m_recorder->recordBulkGenericCreate(str_object_type, entries);
 
-    m_redisChannel->set(key, entries, REDIS_ASIC_STATE_COMMAND_BULK_CREATE);
+    m_communicationChannel->set(key, entries, REDIS_ASIC_STATE_COMMAND_BULK_CREATE);
 
     return waitForBulkResponse(SAI_COMMON_API_BULK_CREATE, (uint32_t)serialized_object_ids.size(), object_statuses);
 }
@@ -1523,6 +1701,10 @@ sai_status_t RedisRemoteSaiInterface::bulkCreate(
 
     // TODO support mode
 
+    static PerformanceIntervalTimer timer("RedisRemoteSaiInterface::bulkCreate(route_entry)");
+
+    timer.start();
+
     std::vector<std::string> serialized_object_ids;
 
     // on create vid is put in db by syncd
@@ -1532,15 +1714,20 @@ sai_status_t RedisRemoteSaiInterface::bulkCreate(
         serialized_object_ids.push_back(str_object_id);
     }
 
-    return bulkCreate(
+    auto status = bulkCreate(
             SAI_OBJECT_TYPE_ROUTE_ENTRY,
             serialized_object_ids,
             attr_count,
             attr_list,
             mode,
             object_statuses);
-}
 
+    timer.stop();
+
+    timer.inc(object_count);
+
+    return status;
+}
 
 sai_status_t RedisRemoteSaiInterface::bulkCreate(
         _In_ uint32_t object_count,
@@ -1572,6 +1759,45 @@ sai_status_t RedisRemoteSaiInterface::bulkCreate(
             object_statuses);
 }
 
+sai_status_t RedisRemoteSaiInterface::bulkCreate(
+        _In_ uint32_t object_count,
+        _In_ const sai_inseg_entry_t* inseg_entry,
+        _In_ const uint32_t *attr_count,
+        _In_ const sai_attribute_t **attr_list,
+        _In_ sai_bulk_op_error_mode_t mode,
+        _Out_ sai_status_t *object_statuses)
+{
+    SWSS_LOG_ENTER();
+
+    // TODO support mode
+
+    static PerformanceIntervalTimer timer("RedisRemoteSaiInterface::bulkCreate(inseg_entry)");
+
+    timer.start();
+
+    std::vector<std::string> serialized_object_ids;
+
+    // on create vid is put in db by syncd
+    for (uint32_t idx = 0; idx < object_count; idx++)
+    {
+        std::string str_object_id = sai_serialize_inseg_entry(inseg_entry[idx]);
+        serialized_object_ids.push_back(str_object_id);
+    }
+
+    auto status = bulkCreate(
+            SAI_OBJECT_TYPE_INSEG_ENTRY,
+            serialized_object_ids,
+            attr_count,
+            attr_list,
+            mode,
+            object_statuses);
+
+    timer.stop();
+
+    timer.inc(object_count);
+
+    return status;
+}
 
 sai_status_t RedisRemoteSaiInterface::bulkCreate(
         _In_ uint32_t object_count,
@@ -1627,7 +1853,7 @@ sai_status_t RedisRemoteSaiInterface::notifySyncd(
 
     m_recorder->recordNotifySyncd(switchId, redisNotifySyncd);
 
-    m_redisChannel->set(key, entry, REDIS_ASIC_STATE_COMMAND_NOTIFY);
+    m_communicationChannel->set(key, entry, REDIS_ASIC_STATE_COMMAND_NOTIFY);
 
     auto status = waitForNotifySyncdResponse();
 
@@ -1642,7 +1868,7 @@ sai_status_t RedisRemoteSaiInterface::waitForNotifySyncdResponse()
 
     swss::KeyOpFieldsValuesTuple kco;
 
-    auto status = m_redisChannel->wait(REDIS_ASIC_STATE_COMMAND_NOTIFY, kco);
+    auto status = m_communicationChannel->wait(REDIS_ASIC_STATE_COMMAND_NOTIFY, kco);
 
     return status;
 }
@@ -1773,7 +1999,7 @@ sai_status_t RedisRemoteSaiInterface::sai_redis_notify_syncd(
 
             case SAI_REDIS_NOTIFY_SYNCD_INSPECT_ASIC:
 
-                SWSS_LOG_NOTICE("inspec ASIC SUCCEEDED");
+                SWSS_LOG_NOTICE("inspect ASIC SUCCEEDED");
 
                 break;
 
@@ -1798,8 +2024,8 @@ void RedisRemoteSaiInterface::clear_local_state()
 
     m_virtualObjectIdManager = 
         std::make_shared<VirtualObjectIdManager>(
-                m_globalContext, 
-                m_switchConfigContainer,
+                m_contextConfig->m_guid,
+                m_contextConfig->m_scc,
                 m_redisVidIndexGenerator);
 
     auto meta = m_meta.lock();
@@ -1868,9 +2094,7 @@ void RedisRemoteSaiInterface::refreshTableDump()
 
     SWSS_LOG_TIMER("get asic view from %s", ASIC_STATE_TABLE);
 
-    auto db = m_redisChannel->getDbConnector();
-
-    swss::Table table(db.get(), ASIC_STATE_TABLE);
+    swss::Table table(m_db.get(), ASIC_STATE_TABLE);
 
     swss::TableDump dump;
 

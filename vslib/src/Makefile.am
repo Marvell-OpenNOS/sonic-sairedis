@@ -13,6 +13,13 @@ libSaiVS_a_SOURCES = \
 					  ../../lib/src/NotificationFdbEvent.cpp \
 					  ../../lib/src/Notification.cpp \
 					  ../../lib/src/NotificationPortStateChange.cpp \
+					  ../../lib/src/PerformanceIntervalTimer.cpp \
+					  Context.cpp \
+					  ContextConfig.cpp \
+					  ContextConfigContainer.cpp \
+					  ResourceLimiter.cpp \
+					  ResourceLimiterContainer.cpp \
+					  ResourceLimiterParser.cpp \
 					  EventPayloadNotification.cpp \
 					  EventPayloadNetLinkMsg.cpp \
 					  SaiEventQueue.cpp \
@@ -46,7 +53,19 @@ libSaiVS_a_SOURCES = \
 					  SwitchState.cpp \
 					  SwitchBCM56850.cpp \
 					  SwitchBCM81724.cpp \
-					  SwitchMLNX2700.cpp
+					  SwitchMLNX2700.cpp \
+					  CorePortIndexMap.cpp \
+					  CorePortIndexMapContainer.cpp \
+					  CorePortIndexMapFileParser.cpp \
+					  MACsecFilter.cpp \
+					  MACsecEgressFilter.cpp \
+					  MACsecIngressFilter.cpp \
+					  TrafficForwarder.cpp \
+					  MACsecForwarder.cpp \
+					  TrafficFilterPipes.cpp \
+					  SwitchStateBaseMACsec.cpp \
+					  MACsecAttr.cpp \
+					  MACsecManager.cpp
 
 libsaivs_la_SOURCES = \
 					  sai_vs_fdb.cpp \

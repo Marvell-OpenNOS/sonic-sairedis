@@ -5,9 +5,15 @@ all: sairedis.cpp setup.py
 install: all
 	python setup.py install --user
 
-.PHONY: clean
+check:
+	true
+
+.PHONY: clean distclean
 
 clean:
 	rm -f *.o *~
 	rm -rf build
 
+distclean:
+	rm -f *.o *~
+	rm -rf build

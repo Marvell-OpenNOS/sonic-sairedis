@@ -4,6 +4,9 @@
 #include "LaneMapContainer.h"
 #include "EventQueue.h"
 #include "EventPayloadNotification.h"
+#include "ResourceLimiterContainer.h"
+#include "CorePortIndexMapContainer.h"
+#include "Context.h"
 
 #include "meta/Meta.h"
 
@@ -178,18 +181,21 @@ namespace saivs
         public: // bulk create ENTRY
 
             SAIVS_SAI_DECLARE_BULK_CREATE_ENTRY(fdb_entry);
+            SAIVS_SAI_DECLARE_BULK_CREATE_ENTRY(inseg_entry);
             SAIVS_SAI_DECLARE_BULK_CREATE_ENTRY(nat_entry);
             SAIVS_SAI_DECLARE_BULK_CREATE_ENTRY(route_entry);
 
         public: // bulk remove ENTRY
 
             SAIVS_SAI_DECLARE_BULK_REMOVE_ENTRY(fdb_entry);
+            SAIVS_SAI_DECLARE_BULK_REMOVE_ENTRY(inseg_entry);
             SAIVS_SAI_DECLARE_BULK_REMOVE_ENTRY(nat_entry);
             SAIVS_SAI_DECLARE_BULK_REMOVE_ENTRY(route_entry);
 
         public: // bulk set ENTRY
 
             SAIVS_SAI_DECLARE_BULK_SET_ENTRY(fdb_entry);
+            SAIVS_SAI_DECLARE_BULK_SET_ENTRY(inseg_entry);
             SAIVS_SAI_DECLARE_BULK_SET_ENTRY(nat_entry);
             SAIVS_SAI_DECLARE_BULK_SET_ENTRY(route_entry);
 
@@ -398,6 +404,11 @@ namespace saivs
 
         private:
 
+            std::shared_ptr<Context> getContext(
+                    _In_ uint32_t globalContext) const;
+
+        private:
+
             bool m_apiInitialized;
 
             std::recursive_mutex m_apimutex;
@@ -413,5 +424,13 @@ namespace saivs
             const char *m_warm_boot_write_file;
 
             std::shared_ptr<LaneMapContainer> m_laneMapContainer;
+
+            std::shared_ptr<LaneMapContainer> m_fabricLaneMapContainer;
+
+            std::shared_ptr<ResourceLimiterContainer> m_resourceLimiterContainer;
+
+            std::shared_ptr<CorePortIndexMapContainer> m_corePortIndexMapContainer;
+
+            std::map<uint32_t, std::shared_ptr<Context>> m_contextMap;
     };
 }

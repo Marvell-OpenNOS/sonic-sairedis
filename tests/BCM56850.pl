@@ -546,8 +546,160 @@ sub test_brcm_query_object_type_get_availability
     play "query_object_type_get_availability.rec";
 }
 
+sub test_brcm_acl_limit
+{
+    fresh_start("-b", "$utils::DIR/bbm.ini", "-p", "$utils::DIR/vsprofile_acl_limit.ini");
+
+    play "acl_limit.rec";
+}
+
+sub test_brcm_buffer_pool_zmq
+{
+    fresh_start("-p", "$utils::DIR/vsprofile_ctx_zmq.ini", "-s", "-g", "0", "-x", "$utils::DIR/ctx_zmq.json");
+
+    # we expect no operations on asic, and all buffer pools will be matched correctly
+
+    play("-p", "$utils::DIR/vsprofile_ctx_zmq.ini", "full_buffer.rec");
+    play("-p", "$utils::DIR/vsprofile_ctx_zmq.ini", "full_buffer_second.rec",0);
+}
+
+sub test_brcm_buffer_pool_zmq_sync_flag
+{
+    fresh_start("-p", "$utils::DIR/vsprofile.ini", "-g", "0", "-z", "zmq_sync");
+
+    # we expect no operations on asic, and all buffer pools will be matched correctly
+
+    play("-p", "$utils::DIR/vsprofile.ini", "-z", "zmq_sync", "full_buffer.rec");
+    play("-p", "$utils::DIR/vsprofile.ini", "-z", "zmq_sync", "full_buffer_second.rec",0);
+}
+
+sub test_bulk_route
+{
+    fresh_start;
+
+    play "bulk_route.rec"
+}
+
+sub test_bulk_fdb
+{
+    fresh_start;
+
+    play "bulk_fdb.rec"
+}
+
+sub test_bulk_object
+{
+    fresh_start;
+
+    play "bulk_object.rec"
+}
+
+sub test_depreacated_enums
+{
+    fresh_start;
+
+    play "depreacated.rec";
+
+    request_warm_shutdown;
+
+    `perl -i.bak -pe 's/SAI_NEXT_HOP_GROUP_TYPE_DYNAMIC_UNORDERED_ECMP/SAI_NEXT_HOP_GROUP_TYPE_ECMP/' sai_warmboot.bin`;
+
+    my $key = `redis-cli -n 1 "keys" "*"|grep SAI_OBJECT_TYPE_NEXT_HOP_GROUP`;
+
+    chomp $key;
+
+    `redis-cli -n 1 hset "$key" "SAI_NEXT_HOP_GROUP_ATTR_TYPE" "SAI_NEXT_HOP_GROUP_TYPE_ECMP"`;
+
+    start_syncd_warm;
+
+    play "non_depreacated.rec", 0;
+}
+
+sub test_bulk_set_multiple
+{
+    fresh_start;
+
+    play "test_bulk_set_multiple_A.rec";
+    play "test_bulk_set_multiple_B.rec", 0;
+}
+
+sub test_lag_label
+{
+    fresh_start;
+
+    play "lag_label_A.rec";
+    play "lag_label_B.rec";
+
+    open (my $H, "<", "applyview.log") or die "failed to open applyview.log $!";
+
+    my $line = <$H>;
+
+    close ($H);
+
+    chomp$line;
+
+    if (not $line =~ /ASIC_OPERATIONS: (\d+)/ or $1 != 8)
+    {
+        print color('red') . "expected 8 ASIC_OPERATIONS count on first line, but got: '$line'" . color('reset') . "\n";
+        exit 1;
+    }
+}
+
+sub test_no_lag_label
+{
+    fresh_start;
+
+    play "no_lag_label_A.rec";
+    play "no_lag_label_B.rec", 2;
+}
+
+sub test_macsec_p2p_establishment
+{
+    fresh_start;
+
+    play "test_macsec_p2p_establishment.rec";
+}
+
+sub test_sairedis_client
+{
+    fresh_start;
+
+    # saiplayer here is acting as OA
+
+    system("../saiplayer/saiplayer -u $utils::DIR/client_switch.rec &");
+
+    sleep 1;
+
+    `./testclient`;
+
+    `killall -9 saiplayer`;
+
+    if ($? != 0)
+    {
+        print color('red') . "test client failed" . color('reset') . "\n";
+        exit 1;
+    }
+}
+
+sub test_ignore_attributes
+{
+    fresh_start;
+
+    play "ignore_attributes.rec";
+}
+
 # RUN TESTS
 
+test_ignore_attributes;
+test_sairedis_client;
+test_macsec_p2p_establishment;
+test_no_lag_label;
+test_lag_label;
+test_bulk_set_multiple;
+test_depreacated_enums;
+test_brcm_buffer_pool_zmq_sync_flag;
+test_brcm_buffer_pool_zmq;
+test_brcm_acl_limit;
 test_sync_brcm_warm_boot_port_remove;
 test_brcm_warm_boot_port_remove;
 test_brcm_warm_boot_port_create;
@@ -560,6 +712,9 @@ test_bridge_create;
 test_ntf;
 test_acl_mask;
 test_empty_lag_buffer_acl;
+test_bulk_route;
+test_bulk_fdb;
+test_bulk_object;
 test_brcm_config_acl;
 test_brcm_warm_wred_queue;
 test_brcm_warm_boot_full_empty;

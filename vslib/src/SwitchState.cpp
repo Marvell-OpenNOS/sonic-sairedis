@@ -55,6 +55,12 @@ SwitchState::SwitchState(
         m_linkCallbackIndex = NetMsgRegistrar::getInstance().registerCallback(
                 std::bind(&SwitchState::asyncOnLinkMsg, this, std::placeholders::_1, std::placeholders::_2));
     }
+
+    if (m_switchConfig->m_resourceLimiter)
+    {
+        SWSS_LOG_NOTICE("resource limiter is SET on switch %s",
+                sai_serialize_object_id(switch_id).c_str());
+    }
 }
 
 SwitchState::~SwitchState()
@@ -217,7 +223,7 @@ sai_status_t SwitchState::getStatsExt(
     }
     else
     {
-        SWSS_LOG_WARN("meta poiner expired");
+        SWSS_LOG_WARN("meta pointer expired");
     }
 
     if (enabled && (number_of_counters & VS_COUNTERS_COUNT_MSB ))

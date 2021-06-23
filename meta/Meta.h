@@ -70,6 +70,8 @@ namespace saimeta
     {
         public:
 
+            using sairedis::SaiInterface::set; // name hiding
+
             Meta(
                     _In_ std::shared_ptr<SaiInterface> impl);
 
@@ -181,18 +183,21 @@ namespace saimeta
         public: // bulk create ENTRY
 
             SAIREDIS_META_DECLARE_BULK_CREATE_ENTRY(fdb_entry);
+            SAIREDIS_META_DECLARE_BULK_CREATE_ENTRY(inseg_entry);
             SAIREDIS_META_DECLARE_BULK_CREATE_ENTRY(nat_entry);
             SAIREDIS_META_DECLARE_BULK_CREATE_ENTRY(route_entry);
 
         public: // bulk remove ENTRY
 
             SAIREDIS_META_DECLARE_BULK_REMOVE_ENTRY(fdb_entry);
+            SAIREDIS_META_DECLARE_BULK_REMOVE_ENTRY(inseg_entry);
             SAIREDIS_META_DECLARE_BULK_REMOVE_ENTRY(nat_entry);
             SAIREDIS_META_DECLARE_BULK_REMOVE_ENTRY(route_entry);
 
         public: // bulk set ENTRY
 
             SAIREDIS_META_DECLARE_BULK_SET_ENTRY(fdb_entry);
+            SAIREDIS_META_DECLARE_BULK_SET_ENTRY(inseg_entry);
             SAIREDIS_META_DECLARE_BULK_SET_ENTRY(nat_entry);
             SAIREDIS_META_DECLARE_BULK_SET_ENTRY(route_entry);
 
@@ -411,7 +416,7 @@ namespace saimeta
                     _In_ sai_object_id_t oid) const;
 
             bool objectExists(
-                    _In_ const std::string& mk) const;
+                    _In_ const sai_object_meta_key_t& mk) const;
 
         private: // port helpers
 

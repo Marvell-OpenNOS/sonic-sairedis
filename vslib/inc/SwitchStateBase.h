@@ -7,13 +7,17 @@
 #include "SwitchConfig.h"
 #include "RealObjectIdManager.h"
 #include "EventPayloadNetLinkMsg.h"
+#include "MACsecManager.h"
 
 #include <set>
 #include <unordered_set>
+#include <vector>
 
 #define SAI_VS_FDB_INFO "SAI_VS_FDB_INFO"
 
 #define DEFAULT_VLAN_NUMBER 1
+
+#define MAX_OBJLIST_LEN 128
 
 #define CHECK_STATUS(status) {                                  \
     sai_status_t _status = (status);                            \
@@ -47,6 +51,8 @@ namespace saivs
 
             virtual sai_status_t set_switch_mac_address();
 
+            virtual sai_status_t set_switch_supported_object_types();
+
             virtual sai_status_t set_switch_default_attributes();
 
             virtual sai_status_t create_default_vlan();
@@ -58,6 +64,10 @@ namespace saivs
             virtual sai_status_t create_ports();
 
             virtual sai_status_t set_port_list();
+
+            virtual sai_status_t create_fabric_ports();
+
+            virtual sai_status_t set_fabric_port_list();
 
             virtual sai_status_t create_default_virtual_router();
 
@@ -82,12 +92,31 @@ namespace saivs
 
             virtual sai_status_t set_number_of_ecmp_groups();
 
+            virtual sai_status_t set_static_crm_values();
+
+            virtual sai_status_t set_static_acl_resource_list(
+                    _In_ sai_switch_attr_t acl_resource,
+                    _In_ int max_count);
+
+            sai_status_t create_system_ports(
+                    _In_ int32_t voq_switch_id,
+                    _In_ uint32_t sys_port_count,
+                    _In_ const sai_system_port_config_t *sys_port_cfg_list);
+
+            sai_status_t set_system_port_list();
+
         public:
 
-            virtual sai_status_t initialize_default_objects();
+            virtual sai_status_t initialize_default_objects(
+                    _In_ uint32_t attr_count,
+                    _In_ const sai_attribute_t *attr_list);
 
             virtual sai_status_t create_port_dependencies(
                     _In_ sai_object_id_t port_id);
+
+            sai_status_t initialize_voq_switch_objects(
+                    _In_ uint32_t attr_count,
+                    _In_ const sai_attribute_t *attr_list);
 
         protected : // refresh
 
@@ -114,6 +143,15 @@ namespace saivs
             virtual sai_status_t refresh_port_list(
                     _In_ const sai_attr_metadata_t *meta);
 
+            virtual sai_status_t refresh_system_port_list(
+                    _In_ const sai_attr_metadata_t *meta);
+
+            virtual sai_status_t refresh_macsec_sci_in_ingress_macsec_acl(
+                    _In_ sai_object_id_t object_id);
+
+            virtual sai_status_t refresh_queue_pause_status(
+                    _In_ sai_object_id_t object_id);
+
         public:
 
             virtual sai_status_t warm_boot_initialize_objects();
@@ -122,7 +160,22 @@ namespace saivs
                     _In_ const sai_attr_metadata_t *meta,
                     _In_ sai_object_id_t object_id);
 
+        protected:
+
+            virtual sai_status_t warm_update_queues();
+
+            virtual sai_status_t warm_update_scheduler_groups();
+
+            virtual sai_status_t warm_update_ingress_priority_groups();
+
+            virtual sai_status_t warm_update_switch();
+
+            virtual sai_status_t warm_update_cpu_queues();
+
         protected: // TODO should be pure
+
+            virtual sai_status_t create_cpu_qos_queues(
+                    _In_ sai_object_id_t port_id);
 
             virtual sai_status_t create_qos_queues_per_port(
                     _In_ sai_object_id_t port_id);
@@ -185,6 +238,28 @@ namespace saivs
                     _In_ const std::string &serializedObjectId,
                     _In_ uint32_t attr_count,
                     _Out_ sai_attribute_t *attr_list);
+
+            virtual sai_status_t bulkCreate(
+                    _In_ sai_object_id_t switch_id,
+                    _In_ sai_object_type_t object_type,
+                    _In_ const std::vector<std::string> &serialized_object_ids,
+                    _In_ const uint32_t *attr_count,
+                    _In_ const sai_attribute_t **attr_list,
+                    _In_ sai_bulk_op_error_mode_t mode,
+                    _Out_ sai_status_t *object_statuses);
+
+            virtual sai_status_t bulkRemove(
+                    _In_ sai_object_type_t object_type,
+                    _In_ const std::vector<std::string> &serialized_object_ids,
+                    _In_ sai_bulk_op_error_mode_t mode,
+                    _Out_ sai_status_t *object_statuses);
+
+            virtual sai_status_t bulkSet(
+                    _In_ sai_object_type_t object_type,
+                    _In_ const std::vector<std::string> &serialized_object_ids,
+                    _In_ const sai_attribute_t *attr_list,
+                    _In_ sai_bulk_op_error_mode_t mode,
+                    _Out_ sai_status_t *object_statuses);
 
         protected:
 
@@ -302,6 +377,12 @@ namespace saivs
             bool check_object_list_default_state(
                     _Out_ const std::vector<sai_object_id_t>& objlist);
 
+            sai_status_t createVoqSystemNeighborEntry(
+                    _In_ const std::string &serializedObjectId,
+                    _In_ sai_object_id_t switch_id,
+                    _In_ uint32_t attr_count,
+                    _In_ const sai_attribute_t *attr_list);
+
         protected: // custom debug counter
 
             uint32_t getNewDebugCounterIndex();
@@ -318,6 +399,11 @@ namespace saivs
             sai_status_t removeDebugCounter(
                     _In_ sai_object_id_t objectId);
 
+        public:
+
+            static int promisc(
+                    _In_ const char *dev);
+
         protected: // custom hostif
 
             sai_status_t createHostif(
@@ -328,7 +414,7 @@ namespace saivs
 
             sai_status_t removeHostif(
                     _In_ sai_object_id_t objectId);
-            
+
             sai_status_t vs_remove_hostif_tap_interface(
                     _In_ sai_object_id_t hostif_id);
 
@@ -349,8 +435,8 @@ namespace saivs
                     _In_ const char *dev,
                     _In_ const sai_mac_t& mac);
 
-            static int promisc(
-                    _In_ const char *dev);
+            static int get_default_gw_mac_address(
+                    _Out_ sai_mac_t& mac);
 
             int vs_set_dev_mtu(
                     _In_ const char*name,
@@ -392,6 +478,107 @@ namespace saivs
 
         protected:
 
+            void findObjects(
+                    _In_ sai_object_type_t object_type,
+                    _In_ const sai_attribute_t &expect,
+                    _Out_ std::vector<sai_object_id_t> &objects);
+
+            bool dumpObject(
+                    _In_ const sai_object_id_t object_id,
+                    _Out_ std::vector<sai_attribute_t> &attrs);
+
+        protected:
+
+            sai_status_t setAclEntry(
+                    _In_ sai_object_id_t entry_id,
+                    _In_ const sai_attribute_t* attr);
+
+            sai_status_t setAclEntryMACsecFlowActive(
+                    _In_ sai_object_id_t entry_id,
+                    _In_ const sai_attribute_t* attr);
+
+            sai_status_t createMACsecPort(
+                    _In_ sai_object_id_t macsec_sa_id,
+                    _In_ sai_object_id_t switch_id,
+                    _In_ uint32_t attr_count,
+                    _In_ const sai_attribute_t *attr_list);
+
+            sai_status_t createMACsecSA(
+                    _In_ sai_object_id_t macsec_sa_id,
+                    _In_ sai_object_id_t switch_id,
+                    _In_ uint32_t attr_count,
+                    _In_ const sai_attribute_t *attr_list);
+
+            sai_status_t createMACsecSC(
+                    _In_ sai_object_id_t macsec_sa_id,
+                    _In_ sai_object_id_t switch_id,
+                    _In_ uint32_t attr_count,
+                    _In_ const sai_attribute_t *attr_list);
+
+            sai_status_t removeMACsecPort(
+                    _In_ sai_object_id_t macsec_port_id);
+
+            sai_status_t removeMACsecSC(
+                    _In_ sai_object_id_t macsec_sc_id);
+
+            sai_status_t removeMACsecSA(
+                    _In_ sai_object_id_t macsec_sa_id);
+
+            sai_status_t getACLTable(
+                    _In_ sai_object_id_t entry_id,
+                    _Out_ sai_object_id_t &table_id);
+
+            sai_status_t findPortByMACsecFlow(
+                    _In_ sai_object_id_t macsec_flow_id,
+                    _Out_ sai_object_id_t &line_port_id);
+
+            std::shared_ptr<HostInterfaceInfo> findHostInterfaceInfoByPort(
+                    _In_ sai_object_id_t line_port_id);
+
+            sai_status_t loadMACsecAttrFromMACsecPort(
+                    _In_ sai_object_id_t object_id,
+                    _In_ uint32_t attr_count,
+                    _In_ const sai_attribute_t *attr_list,
+                    _Out_ MACsecAttr &macsec_attr);
+
+            sai_status_t loadMACsecAttrFromMACsecSC(
+                    _In_ sai_object_id_t object_id,
+                    _In_ uint32_t attr_count,
+                    _In_ const sai_attribute_t *attr_list,
+                    _Out_ MACsecAttr &macsec_attr);
+
+            sai_status_t loadMACsecAttrFromMACsecSA(
+                    _In_ sai_object_id_t object_id,
+                    _In_ uint32_t attr_count,
+                    _In_ const sai_attribute_t *attr_list,
+                    _Out_ MACsecAttr &macsec_attr);
+
+            sai_status_t loadMACsecAttr(
+                    _In_ sai_object_type_t object_type,
+                    _In_ sai_object_id_t object_id,
+                    _In_ uint32_t attr_count,
+                    _In_ const sai_attribute_t *attr_list,
+                    _Out_ MACsecAttr &macsec_attr);
+
+            sai_status_t loadMACsecAttr(
+                    _In_ sai_object_type_t object_type,
+                    _In_ sai_object_id_t object_id,
+                    _Out_ MACsecAttr &macsec_attr);
+
+            sai_status_t loadMACsecAttrsFromACLEntry(
+                    _In_ sai_object_id_t entry_id,
+                    _In_ const sai_attribute_t* entry_attr,
+                    _In_ sai_object_type_t object_type,
+                    _Out_ std::vector<MACsecAttr> &macsec_attrs);
+
+            sai_status_t getMACsecSAPacketNumber(
+                    _In_ sai_object_id_t macsec_sa_id,
+                    _Out_ sai_attribute_t &attr);
+
+            MACsecManager m_macsecManager;
+
+        protected:
+
             constexpr static const int maxDebugCounters = 32;
 
             std::unordered_set<uint32_t> m_indices;
@@ -401,6 +588,8 @@ namespace saivs
             std::vector<sai_object_id_t> m_port_list;
             std::vector<sai_object_id_t> m_bridge_port_list_port_based;
 
+            std::vector<sai_object_id_t> m_fabric_port_list;
+
             std::vector<sai_acl_action_type_t> m_ingress_acl_action_list;
             std::vector<sai_acl_action_type_t> m_egress_acl_action_list;
 
@@ -408,6 +597,32 @@ namespace saivs
             sai_object_id_t m_default_1q_bridge;
             sai_object_id_t m_default_bridge_port_1q_router;
             sai_object_id_t m_default_vlan_id;
+
+            std::vector<sai_object_id_t> m_system_port_list;
+
+        protected:
+
+            constexpr static const int m_maxIPv4RouteEntries = 100000;
+            constexpr static const int m_maxIPv6RouteEntries = 10000;
+
+            constexpr static const int m_maxIPv4NextHopEntries = 32000;
+            constexpr static const int m_maxIPv6NextHopEntries = 32000;
+
+            constexpr static const int m_maxIPv4NeighborEntries = 4000;
+            constexpr static const int m_maxIPv6NeighborEntries = 2000;
+
+            constexpr static const int m_maxNextHopGroupMemberEntries = 16000;
+            constexpr static const int m_maxNextHopGroupEntries = 400;
+
+            constexpr static const int m_maxFdbEntries = 800;
+
+            constexpr static const int m_maxSNATEntries = 100;
+            constexpr static const int m_maxDNATEntries = 100;
+            constexpr static const int m_maxIPMCEntries = 100;
+            constexpr static const int m_maxDoubleNATEntries = 50; /* Half of single NAT entry */
+
+            constexpr static const int m_maxAclTables = 3;
+            constexpr static const int m_maxAclTableGroups = 200;
 
         public: // TODO private
 

@@ -8,10 +8,15 @@ CMD_DSSERVE_ARGS="$CMD_SYNCD --diag"
 
 ENABLE_SAITHRIFT=0
 
+TEMPLATES_DIR=/usr/share/sonic/templates
 PLATFORM_DIR=/usr/share/sonic/platform
 HWSKU_DIR=/usr/share/sonic/hwsku
 
-SONIC_ASIC_TYPE=$(sonic-cfggen -y /etc/sonic/sonic_version.yml -v asic_type)
+VARS_FILE=$TEMPLATES_DIR/swss_vars.j2
+
+# Retrieve vars from sonic-cfggen
+SYNCD_VARS=$(sonic-cfggen -d -y /etc/sonic/sonic_version.yml -t $VARS_FILE) || exit 1
+SONIC_ASIC_TYPE=$(echo $SYNCD_VARS | jq -r '.asic_type')
 
 if [ -x $CMD_DSSERVE ]; then
     CMD=$CMD_DSSERVE
@@ -23,6 +28,16 @@ fi
 
 # Use temporary view between init and apply
 CMD_ARGS+=" -u"
+
+# Use bulk api`s in SAI
+# currently disabled since most vendors don't support that yet
+# CMD_ARGS+=" -l"
+
+# Set synchronous mode if it is enabled in CONFIG_DB
+SYNC_MODE=$(echo $SYNCD_VARS | jq -r '.synchronous_mode')
+if [ "$SYNC_MODE" == "enable" ]; then
+    CMD_ARGS+=" -s"
+fi
 
 case "$(cat /proc/cmdline)" in
   *SONIC_BOOT_TYPE=fastfast*)
@@ -71,18 +86,86 @@ function set_start_type()
     fi
 }
 
+config_syncd_cisco_8000()
+{
+    export BASE_OUTPUT_DIR=/opt/cisco/silicon-one
+    CMD_ARGS+=" -p $HWSKU_DIR/sai.profile"
+}
 
 config_syncd_bcm()
 {
-    if [ -f "/etc/sai.d/sai.profile" ]; then
-        CMD_ARGS+=" -p /etc/sai.d/sai.profile"
+
+    if [ -f $PLATFORM_DIR/common_config_support ];then
+
+      PLATFORM_COMMON_DIR=/usr/share/sonic/device/x86_64-broadcom_common
+
+      cp -f $HWSKU_DIR/*.config.bcm /tmp
+      cp -f /etc/sai.d/sai.profile /tmp
+      CONFIG_BCM=$(find /tmp -name '*.bcm')
+      PLT_CONFIG_BCM=$(find $HWSKU_DIR -name '*.bcm')
+      SAI_PROFILE=$(find /tmp -name 'sai.profile')
+      sed -i 's+/usr/share/sonic/hwsku+/tmp+g' $SAI_PROFILE
+
+      #Get first three characters of chip id
+      readline=$(grep '0x14e4' /proc/linux-kernel-bde)
+      chip_id=${readline#*0x14e4:0x}
+      chip_id=${chip_id::3}
+      COMMON_CONFIG_BCM=$(find $PLATFORM_COMMON_DIR/x86_64-broadcom_${chip_id} -name '*.bcm')
+   
+      if [ -f $PLATFORM_COMMON_DIR/x86_64-broadcom_${chip_id}/*.bcm ]; then
+         for file in $CONFIG_BCM; do
+             echo "" >> $file
+             echo "# Start of chip common properties" >> $file
+             while read line
+             do
+               line=$( echo $line | xargs )
+               if [ ! -z "$line" ];then
+                   if [ "${line::1}" == '#' ];then
+                       echo $line >> $file
+                   else
+                       sedline=${line%=*}
+                       if grep -q $sedline $file ;then
+                          echo "Keep the config $(grep $sedline $file) in $file"
+                       else
+                          echo $line >> $file
+                       fi
+                   fi
+               fi
+             done < $COMMON_CONFIG_BCM
+             echo "# End of chip common properties" >> $file
+         done
+         echo "Merging $PLT_CONFIG_BCM with $COMMON_CONFIG_BCM, merge files stored in $CONFIG_BCM"
+      fi
+
+      #sync the file system
+      sync
+
+      # copy the final config.bcm and sai.profile to the shared folder for 'show tech'
+      cp -f /tmp/sai.profile /var/run/sswsyncd/
+      cp -f /tmp/*.bcm /var/run/sswsyncd/
+
+      if [ -f "/tmp/sai.profile" ]; then
+          CMD_ARGS+=" -p /tmp/sai.profile"
+      elif [ -f "/etc/sai.d/sai.profile" ]; then
+          CMD_ARGS+=" -p /etc/sai.d/sai.profile"
+      else
+          CMD_ARGS+=" -p $HWSKU_DIR/sai.profile"
+      fi
+
     else
-        CMD_ARGS+=" -p $HWSKU_DIR/sai.profile"
+
+      if [ -f "/etc/sai.d/sai.profile" ]; then
+          CMD_ARGS+=" -p /etc/sai.d/sai.profile"
+      else
+          CMD_ARGS+=" -p $HWSKU_DIR/sai.profile"
+      fi
+
     fi
 
     [ -e /dev/linux-bcm-knet ] || mknod /dev/linux-bcm-knet c 122 0
     [ -e /dev/linux-user-bde ] || mknod /dev/linux-user-bde c 126 0
     [ -e /dev/linux-kernel-bde ] || mknod /dev/linux-kernel-bde c 127 0
+
 }
 
 config_syncd_mlnx()
@@ -92,12 +175,24 @@ config_syncd_mlnx()
     [ -e /dev/sxdevs/sxcdev ] || ( mkdir -p /dev/sxdevs && mknod /dev/sxdevs/sxcdev c 231 193 )
 
     # Read MAC address
-    MAC_ADDRESS="$(sonic-cfggen -d -v DEVICE_METADATA.localhost.mac)"
+    MAC_ADDRESS="$(echo $SYNCD_VARS | jq -r '.mac')"
 
-    # Write MAC address into /tmp/profile file.
-    cat $HWSKU_DIR/sai.profile > /tmp/sai.profile
+    # Make default sai.profile
+    if [[ -f $HWSKU_DIR/sai.profile.j2 ]]; then
+        export RESOURCE_TYPE="$(echo $SYNCD_VARS | jq -r '.resource_type')"
+        j2 -e RESOURCE_TYPE $HWSKU_DIR/sai.profile.j2 -o /tmp/sai.profile
+    else
+        cat $HWSKU_DIR/sai.profile > /tmp/sai.profile
+    fi
+
+    # Update sai.profile with MAC_ADDRESS and WARM_BOOT settings
     echo "DEVICE_MAC_ADDRESS=$MAC_ADDRESS" >> /tmp/sai.profile
     echo "SAI_WARM_BOOT_WRITE_FILE=/var/warmboot/" >> /tmp/sai.profile
+    
+    SDK_DUMP_PATH=`cat /tmp/sai.profile|grep "SAI_DUMP_STORE_PATH"|cut -d = -f2`
+    if [ ! -d "$SDK_DUMP_PATH" ]; then
+        mkdir -p "$SDK_DUMP_PATH"
+    fi
 }
 
 config_syncd_centec()
@@ -160,6 +255,9 @@ config_syncd_nephos()
 config_syncd_vs()
 {
     CMD_ARGS+=" -p $HWSKU_DIR/sai.profile"
+    if [ -f $HWSKU_DIR/context_config.json ]; then
+        CMD_ARGS+=" -x $HWSKU_DIR/context_config.json -g 0"
+    fi
 }
 
 config_syncd_innovium()
@@ -175,7 +273,10 @@ config_syncd()
 {
     check_warm_boot
 
-    if [ "$SONIC_ASIC_TYPE" == "broadcom" ]; then
+
+    if [ "$SONIC_ASIC_TYPE" == "cisco-8000" ]; then
+        config_syncd_cisco_8000
+    elif [ "$SONIC_ASIC_TYPE" == "broadcom" ]; then
         config_syncd_bcm
     elif [ "$SONIC_ASIC_TYPE" == "mellanox" ]; then
         config_syncd_mlnx

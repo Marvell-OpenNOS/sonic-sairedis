@@ -1,6 +1,10 @@
 #include "VirtualSwitchSaiInterface.h"
 
+#include "../../lib/inc/PerformanceIntervalTimer.h"
+
 #include "swss/logger.h"
+#include "swss/exec.h"
+#include "swss/converter.h"
 
 #include "meta/sai_serialize.h"
 #include "meta/SaiAttributeList.h"
@@ -23,13 +27,14 @@
 
 using namespace saivs;
 using namespace saimeta;
+using namespace sairediscommon;
 
 VirtualSwitchSaiInterface::VirtualSwitchSaiInterface(
         _In_ const std::shared_ptr<SwitchConfigContainer> scc)
 {
     SWSS_LOG_ENTER();
 
-    m_realObjectIdManager = std::make_shared<RealObjectIdManager>(0, scc);
+    m_realObjectIdManager = std::make_shared<RealObjectIdManager>(0, scc); // TODO fix global context
 
     m_switchConfigContainer = scc;
 }
@@ -477,13 +482,38 @@ sai_status_t VirtualSwitchSaiInterface::create(                 \
             attr_list);                                         \
 }
 
+sai_status_t VirtualSwitchSaiInterface::create(
+        _In_ const sai_route_entry_t* entry,
+        _In_ uint32_t attr_count,
+        _In_ const sai_attribute_t *attr_list)
+{
+    SWSS_LOG_ENTER();
+
+    static PerformanceIntervalTimer timer("VirtualSwitchSaiInterface::create(route_entry)");
+
+    timer.start();
+
+    auto status = create(
+            entry->switch_id,
+            SAI_OBJECT_TYPE_ROUTE_ENTRY,
+            sai_serialize_route_entry(*entry),
+            attr_count,
+            attr_list);
+
+    timer.stop();
+
+    timer.inc();
+
+    return status;
+}
+
 DECLARE_CREATE_ENTRY(FDB_ENTRY,fdb_entry);
 DECLARE_CREATE_ENTRY(INSEG_ENTRY,inseg_entry);
 DECLARE_CREATE_ENTRY(IPMC_ENTRY,ipmc_entry);
 DECLARE_CREATE_ENTRY(L2MC_ENTRY,l2mc_entry);
 DECLARE_CREATE_ENTRY(MCAST_FDB_ENTRY,mcast_fdb_entry);
 DECLARE_CREATE_ENTRY(NEIGHBOR_ENTRY,neighbor_entry);
-DECLARE_CREATE_ENTRY(ROUTE_ENTRY,route_entry);
+//DECLARE_CREATE_ENTRY(ROUTE_ENTRY,route_entry);
 DECLARE_CREATE_ENTRY(NAT_ENTRY,nat_entry);
 
 #define DECLARE_SET_ENTRY(OT,ot)                                \
@@ -512,7 +542,9 @@ std::shared_ptr<SwitchStateBase> VirtualSwitchSaiInterface::init_switch(
         _In_ sai_object_id_t switch_id,
         _In_ std::shared_ptr<SwitchConfig> config,
         _In_ std::shared_ptr<WarmBootState> warmBootState,
-        _In_ std::weak_ptr<saimeta::Meta> meta)
+        _In_ std::weak_ptr<saimeta::Meta> meta,
+        _In_ uint32_t attr_count,
+        _In_ const sai_attribute_t *attr_list)
 {
     SWSS_LOG_ENTER();
 
@@ -567,7 +599,7 @@ std::shared_ptr<SwitchStateBase> VirtualSwitchSaiInterface::init_switch(
     }
     else
     {
-        sai_status_t status = ss->initialize_default_objects(); // TODO move to constructor
+        sai_status_t status = ss->initialize_default_objects(attr_count, attr_list); // TODO move to constructor
 
         if (status != SAI_STATUS_SUCCESS)
         {
@@ -619,12 +651,14 @@ sai_status_t VirtualSwitchSaiInterface::create(
 
             if (warmBootState == nullptr)
             {
-                SWSS_LOG_WARN("warm boot was requested on switch %s, but warm boot state is NULL, will perform COLD boot",
+                SWSS_LOG_ERROR("warm boot was requested on switch %s, but warm boot state is NULL",
                         sai_serialize_object_id(switchId).c_str());
+
+                return SAI_STATUS_FAILURE;
             }
         }
 
-        auto ss = init_switch(switchId, config, warmBootState, m_meta);
+        auto ss = init_switch(switchId, config, warmBootState, m_meta, attr_count, attr_list);
 
         if (!ss)
         {
@@ -785,6 +819,26 @@ sai_status_t VirtualSwitchSaiInterface::objectTypeGetAvailability(
         *count = 3;
         return SAI_STATUS_SUCCESS;
     }
+    // MPLS Inseg and MPLS NH CRM use sai_object_type_get_availability() API.
+    else if ((objectType == SAI_OBJECT_TYPE_INSEG_ENTRY) ||
+             ((objectType == SAI_OBJECT_TYPE_NEXT_HOP) &&
+              (attrCount == 1) && attrList &&
+              (attrList[0].id == SAI_NEXT_HOP_ATTR_TYPE) &&
+              (attrList[0].value.s32 == SAI_NEXT_HOP_TYPE_MPLS)))
+    {
+        std::string cmd_str("sysctl net.mpls.platform_labels");
+        std::string ret_str;
+        *count = 1000;
+        if (!swss::exec(cmd_str, ret_str))
+        {
+            std::string match("net.mpls.platform_labels = ");
+            if (ret_str.find(match) != std::string::npos)
+            {
+                *count = std::stoul(ret_str.substr(match.length()).c_str());
+            }
+        }
+        return SAI_STATUS_SUCCESS;
+    }
 
     return SAI_STATUS_NOT_SUPPORTED;
 }
@@ -844,6 +898,21 @@ sai_status_t VirtualSwitchSaiInterface::queryAattributeEnumValuesCapability(
         enum_values_capability->count = 2;
         enum_values_capability->list[0] = SAI_OUT_DROP_REASON_L2_ANY;
         enum_values_capability->list[1] = SAI_OUT_DROP_REASON_L3_ANY;
+
+        return SAI_STATUS_SUCCESS;
+    }
+    else if (object_type == SAI_OBJECT_TYPE_DEBUG_COUNTER && attr_id == SAI_DEBUG_COUNTER_ATTR_TYPE)
+    {
+        if (enum_values_capability->count < 4)
+        {
+            return SAI_STATUS_BUFFER_OVERFLOW;
+        }
+
+        enum_values_capability->count = 4;
+        enum_values_capability->list[0] = SAI_DEBUG_COUNTER_TYPE_PORT_IN_DROP_REASONS;
+        enum_values_capability->list[1] = SAI_DEBUG_COUNTER_TYPE_PORT_OUT_DROP_REASONS;
+        enum_values_capability->list[2] = SAI_DEBUG_COUNTER_TYPE_SWITCH_IN_DROP_REASONS;
+        enum_values_capability->list[3] = SAI_DEBUG_COUNTER_TYPE_SWITCH_OUT_DROP_REASONS;
 
         return SAI_STATUS_SUCCESS;
     }
@@ -952,7 +1021,9 @@ sai_status_t VirtualSwitchSaiInterface::bulkRemove(
 {
     SWSS_LOG_ENTER();
 
-    return SAI_STATUS_NOT_IMPLEMENTED;
+    auto ss = m_switchStateMap.at(switchId);
+
+    return ss->bulkRemove(object_type, serialized_object_ids, mode, object_statuses);
 }
 
 sai_status_t VirtualSwitchSaiInterface::bulkRemove(
@@ -1010,6 +1081,24 @@ sai_status_t VirtualSwitchSaiInterface::bulkRemove(
     }
 
     return bulkRemove(nat_entry->switch_id, SAI_OBJECT_TYPE_NAT_ENTRY, serializedObjectIds, mode, object_statuses);
+}
+
+sai_status_t VirtualSwitchSaiInterface::bulkRemove(
+        _In_ uint32_t object_count,
+        _In_ const sai_inseg_entry_t *inseg_entry,
+        _In_ sai_bulk_op_error_mode_t mode,
+        _Out_ sai_status_t *object_statuses)
+{
+    SWSS_LOG_ENTER();
+
+    std::vector<std::string> serializedObjectIds;
+
+    for (uint32_t idx = 0; idx < object_count; idx++)
+    {
+        serializedObjectIds.emplace_back(sai_serialize_inseg_entry(inseg_entry[idx]));
+    }
+
+    return bulkRemove(inseg_entry->switch_id, SAI_OBJECT_TYPE_INSEG_ENTRY, serializedObjectIds, mode, object_statuses);
 }
 
 sai_status_t VirtualSwitchSaiInterface::bulkRemove(
@@ -1092,6 +1181,25 @@ sai_status_t VirtualSwitchSaiInterface::bulkSet(
 
 sai_status_t VirtualSwitchSaiInterface::bulkSet(
         _In_ uint32_t object_count,
+        _In_ const sai_inseg_entry_t *inseg_entry,
+        _In_ const sai_attribute_t *attr_list,
+        _In_ sai_bulk_op_error_mode_t mode,
+        _Out_ sai_status_t *object_statuses)
+{
+    SWSS_LOG_ENTER();
+
+    std::vector<std::string> serializedObjectIds;
+
+    for (uint32_t idx = 0; idx < object_count; idx++)
+    {
+        serializedObjectIds.emplace_back(sai_serialize_inseg_entry(inseg_entry[idx]));
+    }
+
+    return bulkSet(inseg_entry->switch_id, SAI_OBJECT_TYPE_INSEG_ENTRY, serializedObjectIds, attr_list, mode, object_statuses);
+}
+
+sai_status_t VirtualSwitchSaiInterface::bulkSet(
+        _In_ uint32_t object_count,
         _In_ const sai_fdb_entry_t *fdb_entry,
         _In_ const sai_attribute_t *attr_list,
         _In_ sai_bulk_op_error_mode_t mode,
@@ -1119,7 +1227,9 @@ sai_status_t VirtualSwitchSaiInterface::bulkSet(
 {
     SWSS_LOG_ENTER();
 
-    return SAI_STATUS_NOT_IMPLEMENTED;
+    auto ss = m_switchStateMap.at(switchId);
+
+    return ss->bulkSet(object_type, serialized_object_ids, attr_list, mode, object_statuses);
 }
 
 sai_status_t VirtualSwitchSaiInterface::bulkCreate(
@@ -1164,9 +1274,9 @@ sai_status_t VirtualSwitchSaiInterface::bulkCreate(
 {
     SWSS_LOG_ENTER();
 
-    // support mode !
+    auto ss = m_switchStateMap.at(switchId);
 
-    return SAI_STATUS_NOT_IMPLEMENTED;
+    return ss->bulkCreate(switchId, object_type, serialized_object_ids, attr_count, attr_list, mode, object_statuses);;
 }
 
 sai_status_t VirtualSwitchSaiInterface::bulkCreate(
@@ -1220,6 +1330,35 @@ sai_status_t VirtualSwitchSaiInterface::bulkCreate(
     return bulkCreate(
             fdb_entry->switch_id,
             SAI_OBJECT_TYPE_FDB_ENTRY,
+            serialized_object_ids,
+            attr_count,
+            attr_list,
+            mode,
+            object_statuses);
+}
+
+sai_status_t VirtualSwitchSaiInterface::bulkCreate(
+        _In_ uint32_t object_count,
+        _In_ const sai_inseg_entry_t* inseg_entry,
+        _In_ const uint32_t *attr_count,
+        _In_ const sai_attribute_t **attr_list,
+        _In_ sai_bulk_op_error_mode_t mode,
+        _Out_ sai_status_t *object_statuses)
+{
+    SWSS_LOG_ENTER();
+
+    std::vector<std::string> serialized_object_ids;
+
+    // on create vid is put in db by syncd
+    for (uint32_t idx = 0; idx < object_count; idx++)
+    {
+        std::string str_object_id = sai_serialize_inseg_entry(inseg_entry[idx]);
+        serialized_object_ids.push_back(str_object_id);
+    }
+
+    return bulkCreate(
+            inseg_entry->switch_id,
+            SAI_OBJECT_TYPE_INSEG_ENTRY,
             serialized_object_ids,
             attr_count,
             attr_list,
@@ -1298,6 +1437,11 @@ bool VirtualSwitchSaiInterface::writeWarmBootFile(
             return false;
         }
 
+        if (m_warmBootData.size() == 0)
+        {
+            SWSS_LOG_WARN("warm boot data is empty, is that what you want?");
+        }
+
         for (auto& kvp: m_warmBootData)
         {
             ofs << kvp.second;
@@ -1326,6 +1470,11 @@ bool VirtualSwitchSaiInterface::readWarmBootFile(
         SWSS_LOG_ERROR("warm boot read file is NULL");
 
         return false;
+    }
+
+    {
+        std::ifstream in(warmBootFile, std::ifstream::ate | std::ifstream::binary);
+        SWSS_LOG_NOTICE("%s file size: %zu", warmBootFile, (size_t)in.tellg());
     }
 
     std::ifstream ifs;
@@ -1433,7 +1582,7 @@ bool VirtualSwitchSaiInterface::readWarmBootFile(
 
     ifs.close();
 
-    SWSS_LOG_NOTICE("warm boot file %s stats:", warmBootFile);
+    SWSS_LOG_NOTICE("warm boot file %s stats, loaded switches: %zu", warmBootFile, m_warmBootState.size());
 
     for (auto& kvp: m_warmBootState)
     {

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "sairedis.h"
+
 #include "swss/sal.h"
 
 #include <string>
@@ -68,6 +70,10 @@ namespace syncd
 
             bool m_enableSyncMode;
 
+            bool m_enableSaiBulkSupport;
+
+            sai_redis_communication_mode_t m_redisCommunicationMode;
+
             sai_start_type_t m_startType;
 
             std::string m_profileMapFile;
@@ -75,6 +81,8 @@ namespace syncd
             uint32_t m_globalContext;
 
             std::string m_contextConfig;
+
+            std::string m_breakConfig;
 
 #ifdef SAITHRIFT
             bool m_runRPCServer;

@@ -12,7 +12,7 @@ using namespace syncd;
 
 #define MAX_OBJLIST_LEN 128
 
-const int maxLanesPerPort = 8;
+#define MAX_LANES_PER_PORT 8
 
 /*
  * NOTE: If real ID will change during hard restarts, then we need to remap all
@@ -27,6 +27,7 @@ SaiSwitch::SaiSwitch(
         _In_ std::shared_ptr<VirtualOidTranslator> translator,
         _In_ std::shared_ptr<sairedis::SaiInterface> vendorSai,
         _In_ bool warmBoot):
+    SaiSwitchInterface(switch_vid, switch_rid),
     m_vendorSai(vendorSai),
     m_warmBoot(warmBoot),
     m_translator(translator),
@@ -35,9 +36,6 @@ SaiSwitch::SaiSwitch(
     SWSS_LOG_ENTER();
 
     SWSS_LOG_TIMER("constructor");
-
-    m_switch_rid = switch_rid;
-    m_switch_vid = switch_vid;
 
     GlobalSwitchId::setSwitchId(m_switch_rid);
 
@@ -78,7 +76,6 @@ SaiSwitch::SaiSwitch(
         checkWarmBootDiscoveredRids();
     }
 }
-
 
 /*
  * NOTE: all those methods could be implemented inside SaiSwitch class so then
@@ -148,7 +145,9 @@ sai_switch_type_t SaiSwitch::getSwitchType() const
 
     if (status != SAI_STATUS_SUCCESS)
     {
-        SWSS_LOG_ERROR("failed to get switch type with status:0x%x. Assume default SAI_SWITCH_TYPE_NPU", status);
+        SWSS_LOG_WARN("failed to get switch type with status: %s, assume default SAI_SWITCH_TYPE_NPU",
+                sai_serialize_status(status).c_str());
+
         // Set to SAI_SWITCH_TYPE_NPU and move on
         attr.value.s32 = SAI_SWITCH_TYPE_NPU;
     }
@@ -242,16 +241,16 @@ std::unordered_map<sai_uint32_t, sai_object_id_t> SaiSwitch::saiGetHardwareLaneM
      * addressed in future.
      */
 
-    for (const auto &port_rid : portList)
+    for (const auto &port_rid: portList)
     {
-        sai_uint32_t lanes[maxLanesPerPort];
+        sai_uint32_t lanes[MAX_LANES_PER_PORT];
 
         memset(lanes, 0, sizeof(lanes));
 
         sai_attribute_t attr;
 
         attr.id = SAI_PORT_ATTR_HW_LANE_LIST;
-        attr.value.u32list.count = maxLanesPerPort;
+        attr.value.u32list.count = MAX_LANES_PER_PORT;
         attr.value.u32list.list = lanes;
 
         sai_status_t status = m_vendorSai->get(SAI_OBJECT_TYPE_PORT, port_rid, 1, &attr);
@@ -338,20 +337,6 @@ void SaiSwitch::redisSetDummyAsicStateForRealObjectId(
     sai_object_id_t vid = m_translator->translateRidToVid(rid, m_switch_vid);
 
     m_client->setDummyAsicStateObject(vid);
-}
-
-sai_object_id_t SaiSwitch::getVid() const
-{
-    SWSS_LOG_ENTER();
-
-    return m_switch_vid;
-}
-
-sai_object_id_t SaiSwitch::getRid() const
-{
-    SWSS_LOG_ENTER();
-
-    return m_switch_rid;
 }
 
 std::string SaiSwitch::getHardwareInfo() const
@@ -517,7 +502,7 @@ sai_object_id_t SaiSwitch::helperGetSwitchAttrOid(
          * Redis value of this attribute is not present yet, save it!
          */
 
-        redisSetDummyAsicStateForRealObjectId(rid);
+        redisSaveInternalOids(rid);
 
         SWSS_LOG_INFO("redis %s id is not defined yet in redis", meta->attridname);
 
@@ -547,25 +532,6 @@ sai_object_id_t SaiSwitch::helperGetSwitchAttrOid(
     m_default_rid_map[attr_id] = rid;
 
     return rid;
-}
-
-sai_object_id_t SaiSwitch::getSwitchDefaultAttrOid(
-        _In_ sai_attr_id_t attr_id) const
-{
-    SWSS_LOG_ENTER();
-
-    auto it = m_default_rid_map.find(attr_id);
-
-    if (it == m_default_rid_map.end())
-    {
-        auto meta = sai_metadata_get_attr_metadata(SAI_OBJECT_TYPE_SWITCH, attr_id);
-
-        const char* name = (meta) ? meta->attridname : "UNKNOWN";
-
-        SWSS_LOG_THROW("attribute %s (%d) not found in default RID map", name, attr_id);
-    }
-
-    return it->second;
 }
 
 bool SaiSwitch::isColdBootDiscoveredRid(
@@ -611,6 +577,20 @@ bool SaiSwitch::isNonRemovableRid(
         SWSS_LOG_THROW("NULL rid passed");
     }
 
+    /*
+     * Check for SAI_SWITCH_ATTR_DEFAULT_* oids like cpu, default virtual
+     * router.  Those objects can't be removed if user ask for it.
+     */
+
+    /* Here we are checking for isSwitchObjectDefaultRid first then ColdBootDiscoveredRid
+     * as it is possible we can discover switch Internal OID as part of warm-boot also especially
+     * when we are doing SAI upgrade as part of warm-boot.*/
+
+    if (isSwitchObjectDefaultRid(rid))
+    {
+        return true;
+    }
+
     if (!isColdBootDiscoveredRid(rid))
     {
         /*
@@ -618,16 +598,6 @@ bool SaiSwitch::isNonRemovableRid(
          */
 
         return false;
-    }
-
-    /*
-     * Check for SAI_SWITCH_ATTR_DEFAULT_* oids like cpu, default virtual
-     * router.  Those objects can't be removed if user ask for it.
-     */
-
-    if (isSwitchObjectDefaultRid(rid))
-    {
-        return true;
     }
 
     sai_object_type_t ot = m_vendorSai->objectTypeQuery(rid);
@@ -742,6 +712,34 @@ std::set<sai_object_id_t> SaiSwitch::getWarmBootDiscoveredVids() const
     SWSS_LOG_ENTER();
 
     return m_warmBootDiscoveredVids;
+}
+
+void SaiSwitch::redisSaveInternalOids(
+        _In_ sai_object_id_t rid) const
+{
+    SWSS_LOG_ENTER();
+
+    std::set<sai_object_id_t> coldVids;
+
+    sai_object_id_t vid = m_translator->translateRidToVid(rid, m_switch_vid);
+
+    coldVids.insert(vid);
+
+    /* Save Switch Internal OID put in current view asic state and also
+     * in ColdVid Table discovered as cold or warm boot.
+     * Please note it is possible to discover new Switch internal OID in warm-boot also
+     * if SAI gets upgraded as part of warm-boot so we are adding to ColdVid also
+     * so that comparison logic do not remove this OID in warm-boot case. One example
+     * is SAI_SWITCH_ATTR_DEFAULT_STP_INST_ID which is discovered in warm-boot 
+     * when upgrading to new SAI Version*/
+
+    m_client->setDummyAsicStateObject(vid);
+
+    m_client->saveColdBootDiscoveredVids(m_switch_vid, coldVids);
+
+    SWSS_LOG_NOTICE("put switch internal discovered rid %s to Asic View and COLDVIDS", 
+            sai_serialize_object_id(rid).c_str());
+
 }
 
 void SaiSwitch::redisSaveColdBootDiscoveredVids() const
@@ -908,11 +906,36 @@ void SaiSwitch::helperPopulateWarmBootVids()
     if (!m_warmBoot)
         return;
 
+    SWSS_LOG_NOTICE("populate warm boot VIDs");
+
+    // It may happen, that after warm boot some new oids were discovered that
+    // were not present on warm shutdown, this may happen during vendor SAI
+    // update and for example introducing some new default objects on switch or
+    // queues on cpu. In this case, translator will create new VID/RID pair on
+    // database and local memory.
+
+    auto rid2vid = getRidToVidMap();
+
     for (sai_object_id_t rid: m_discovered_rids)
     {
         sai_object_id_t vid = m_translator->translateRidToVid(rid, m_switch_vid);
 
         m_warmBootDiscoveredVids.insert(vid);
+
+        if (rid2vid.find(rid) == rid2vid.end())
+        {
+            SWSS_LOG_NOTICE("spotted new RID %s (VID %s) on WARM BOOT",
+                    sai_serialize_object_id(rid).c_str(),
+                    sai_serialize_object_id(vid).c_str());
+
+            m_warmBootNewDiscoveredVids.insert(vid);
+
+            // this means that some new objects were discovered but they are
+            // not present in current ASIC_VIEW, and we need to create dummy
+            // entries for them
+
+            redisSetDummyAsicStateForRealObjectId(rid);
+        }
     }
 }
 
@@ -923,12 +946,12 @@ std::vector<uint32_t> SaiSwitch::saiGetPortLanes(
 
     std::vector<uint32_t> lanes;
 
-    lanes.resize(maxLanesPerPort);
+    lanes.resize(MAX_LANES_PER_PORT);
 
     sai_attribute_t attr;
 
     attr.id = SAI_PORT_ATTR_HW_LANE_LIST;
-    attr.value.u32list.count = maxLanesPerPort;
+    attr.value.u32list.count = MAX_LANES_PER_PORT;
     attr.value.u32list.list = lanes.data();
 
     sai_status_t status = m_vendorSai->get(SAI_OBJECT_TYPE_PORT, port_rid, 1, &attr);
@@ -1111,7 +1134,7 @@ void SaiSwitch::postPortRemove(
         if (vid == SAI_NULL_OBJECT_ID)
         {
             SWSS_LOG_THROW("expected rid %s to be present in RIDTOVID",
-                   sai_serialize_object_id(rid).c_str());
+                    sai_serialize_object_id(rid).c_str());
         }
 
         // TODO should this remove rid,vid and object be as db op?
@@ -1132,7 +1155,7 @@ void SaiSwitch::postPortRemove(
     if (removed == 0)
     {
         SWSS_LOG_THROW("NO LANES found in redis lane map for given port RID %s",
-            sai_serialize_object_id(portRid).c_str());
+                sai_serialize_object_id(portRid).c_str());
     }
 
     SWSS_LOG_NOTICE("post port remove actions succeeded");

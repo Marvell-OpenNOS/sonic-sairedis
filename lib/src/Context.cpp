@@ -2,6 +2,8 @@
 
 #include "swss/logger.h"
 
+#include "meta/sai_serialize.h"
+
 using namespace sairedis;
 using namespace std::placeholders;
 
@@ -17,9 +19,7 @@ Context::Context(
 
     // will create notification thread
     m_redisSai = std::make_shared<RedisRemoteSaiInterface>(
-            m_contextConfig->m_guid,
-            m_contextConfig->m_scc,
-            m_contextConfig->m_dbAsic,
+            m_contextConfig,
             std::bind(&Context::handle_notification, this, _1),
             m_recorder);
 
@@ -53,6 +53,15 @@ void Context::populateMetadata(
     SWSS_LOG_ENTER();
 
     auto& dump = m_redisSai->getTableDump();
+
+    SWSS_LOG_NOTICE("dump size: %zu", dump.size());
+
+    if (dump.size() == 0)
+    {
+        SWSS_LOG_NOTICE("skipping populate metadata for switch %s, (probably connecting to already existing switch)",
+                sai_serialize_object_id(switchId).c_str());
+        return;
+    }
 
     m_meta->populate(dump.at(switchId));
 }

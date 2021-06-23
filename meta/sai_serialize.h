@@ -126,6 +126,22 @@ std::string sai_serialize_tunnel_stat(
 std::string sai_serialize_queue_attr(
         _In_ const sai_queue_attr_t attr);
 
+std::string sai_serialize_hex_binary(
+        _In_ const void *buffer,
+        _In_ size_t length);
+
+template <typename T>
+std::string sai_serialize_hex_binary(
+        _In_ const T &value)
+{
+    SWSS_LOG_ENTER();
+
+    return sai_serialize_hex_binary(&value, sizeof(T));
+}
+
+std::string sai_serialize_macsec_sa_attr(
+        _In_ const  sai_macsec_sa_attr_t &attr);
+
 std::string sai_serialize_switch_oper_status(
         _In_ sai_object_id_t switch_id,
         _In_ sai_switch_oper_status_t status);
@@ -189,6 +205,9 @@ std::string sai_serialize_queue_deadlock_ntf(
 
 std::string sai_serialize(
         _In_ const sai_redis_notify_syncd_t& value);
+
+std::string sai_serialize_redis_communication_mode(
+        _In_ sai_redis_communication_mode_t value);
 
 // deserialize
 
@@ -289,6 +308,18 @@ void sai_deserialize_object_meta_key(
         _In_ const std::string &s,
         _Out_ sai_object_meta_key_t& meta_key);
 
+void sai_deserialize_ip_address(
+        _In_ const std::string& s,
+        _Out_ sai_ip_address_t& ipaddr);
+
+void sai_deserialize_ip_prefix(
+        _In_ const std::string &s,
+        _Out_ sai_ip_prefix_t &ip_prefix);
+
+void sai_deserialize_mac(
+        _In_ const std::string& s,
+        _Out_ sai_mac_t& mac);
+
 // deserialize notifications
 
 void sai_deserialize_fdb_event_ntf(
@@ -334,6 +365,10 @@ void sai_deserialize_queue_attr(
         _In_ const std::string& s,
         _Out_ sai_queue_attr_t& attr);
 
+void sai_deserialize_macsec_sa_attr(
+        _In_ const std::string& s,
+        _Out_ sai_macsec_sa_attr_t& attr);
+
 // sairedis
 
 void sai_deserialize(
@@ -342,5 +377,9 @@ void sai_deserialize(
 
 sai_redis_notify_syncd_t sai_deserialize_redis_notify_syncd(
         _In_ const std::string& s);
+
+void sai_deserialize_redis_communication_mode(
+        _In_ const std::string& s,
+        _Out_ sai_redis_communication_mode_t& value);
 
 #endif // __SAI_SERIALIZE__

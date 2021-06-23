@@ -109,6 +109,11 @@ void AsicView::fromDump(
                 m_soNatEntries[o->m_str_object_id] = o;
                 break;
 
+            case SAI_OBJECT_TYPE_INSEG_ENTRY:
+                sai_deserialize_inseg_entry(o->m_str_object_id, o->m_meta_key.objectkey.key.inseg_entry);
+                m_soInsegs[o->m_str_object_id] = o;
+                break;
+
             default:
 
                 if (o->m_info->isnonobjectid)
@@ -339,7 +344,7 @@ void AsicView::bindNewVidReference(
 
     int referenceCount = ++(it->second);
 
-    SWSS_LOG_INFO("increased vid %s refrence to %d",
+    SWSS_LOG_INFO("increased vid %s reference to %d",
             sai_serialize_object_id(vid).c_str(),
             referenceCount);
 }
@@ -568,6 +573,8 @@ void AsicView::asicSetAttribute(
 
     auto meta = attr->getAttrMetadata();
 
+    auto currentAttr = currentObj->tryGetSaiAttr(meta->attrid);
+
     if (attr->isObjectIdAttr())
     {
         if (currentObj->hasAttr(meta->attrid))
@@ -610,12 +617,17 @@ void AsicView::asicSetAttribute(
 
     std::string key = currentObj->m_str_object_type + ":" + currentObj->m_str_object_id;
 
-    std::shared_ptr<swss::KeyOpFieldsValuesTuple> kco =
-        std::make_shared<swss::KeyOpFieldsValuesTuple>(key, "set", entry);
+    auto kco = std::make_shared<swss::KeyOpFieldsValuesTuple>(key, "set", entry);
 
     sai_object_id_t vid = (currentObj->isOidObject()) ? currentObj->getVid() : SAI_NULL_OBJECT_ID;
 
     m_asicOperations.push_back(AsicOperation(m_asicOperationId, vid, false, kco));
+
+    if (currentAttr)
+    {
+        // if current attribute exists, save it value for log purpose
+        m_asicOperations.rbegin()->m_currentValue = currentAttr->getStrAttrValue();
+    }
 
     dumpRef("set");
 }
@@ -689,6 +701,10 @@ void AsicView::asicCreateObject(
                 m_soNatEntries[currentObj->m_str_object_id] = currentObj;
                 break;
 
+            case SAI_OBJECT_TYPE_INSEG_ENTRY:
+                m_soInsegs[currentObj->m_str_object_id] = currentObj;
+                break;
+
             default:
 
                 SWSS_LOG_THROW("unsupported object type: %s",
@@ -732,8 +748,7 @@ void AsicView::asicCreateObject(
 
     std::string key = currentObj->m_str_object_type + ":" + currentObj->m_str_object_id;
 
-    std::shared_ptr<swss::KeyOpFieldsValuesTuple> kco =
-        std::make_shared<swss::KeyOpFieldsValuesTuple>(key, "create", entry);
+    auto kco = std::make_shared<swss::KeyOpFieldsValuesTuple>(key, "create", entry);
 
     sai_object_id_t vid = (currentObj->isOidObject()) ? currentObj->getVid() : SAI_NULL_OBJECT_ID;
 
@@ -754,6 +769,11 @@ void AsicView::asicRemoveObject(
 
     SWSS_LOG_INFO("%s: %s", currentObj->m_str_object_type.c_str(), currentObj->m_str_object_id.c_str());
 
+    if (currentObj->getObjectStatus() != SAI_OBJECT_STATUS_NOT_PROCESSED)
+    {
+        SWSS_LOG_THROW("FATAL: removing object with status: %d, logic error", currentObj->getObjectStatus());
+    }
+
     m_asicOperationId++;
 
     if (currentObj->isOidObject())
@@ -762,6 +782,16 @@ void AsicView::asicRemoveObject(
          * Reference count is already check externally, but we can move
          * that check here also as sanity check.
          */
+
+        int count = getVidReferenceCount(currentObj->getVid());
+
+        if (count != 0)
+        {
+            SWSS_LOG_THROW("can't remove existing object %s:%s since reference count is %d, FIXME",
+                    currentObj->m_str_object_type.c_str(),
+                    currentObj->m_str_object_id.c_str(),
+                    count);
+        }
 
         m_soOids.erase(currentObj->m_str_object_id);
         m_oOids.erase(currentObj->m_meta_key.objectkey.key.object_id);
@@ -816,7 +846,11 @@ void AsicView::asicRemoveObject(
                 break;
 
             case SAI_OBJECT_TYPE_NAT_ENTRY:
-                m_soNatEntries[currentObj->m_str_object_id] = currentObj;
+                m_soNatEntries.erase(currentObj->m_str_object_id);
+                break;
+
+            case SAI_OBJECT_TYPE_INSEG_ENTRY:
+                m_soInsegs.erase(currentObj->m_str_object_id);
                 break;
 
             default:
@@ -841,8 +875,7 @@ void AsicView::asicRemoveObject(
 
     std::string key = currentObj->m_str_object_type + ":" + currentObj->m_str_object_id;
 
-    std::shared_ptr<swss::KeyOpFieldsValuesTuple> kco =
-        std::make_shared<swss::KeyOpFieldsValuesTuple>(key, "remove", entry);
+    auto kco = std::make_shared<swss::KeyOpFieldsValuesTuple>(key, "remove", entry);
 
     sai_object_id_t vid = (currentObj->isOidObject()) ? currentObj->getVid() : SAI_NULL_OBJECT_ID;
 
@@ -934,7 +967,7 @@ std::vector<AsicOperation> AsicView::asicGetWithOptimizedRemoveOperations() cons
 
         if (op.m_vid == SAI_NULL_OBJECT_ID)
         {
-            SWSS_LOG_THROW("non object id remove not exected here");
+            SWSS_LOG_THROW("non object id remove not expected here");
         }
 
         auto mit = m_vidToAsicOperationId.find(op.m_vid);
@@ -953,8 +986,8 @@ std::vector<AsicOperation> AsicView::asicGetWithOptimizedRemoveOperations() cons
 
             auto ot = VidManager::objectTypeQuery(op.m_vid);
 
-            SWSS_LOG_INFO("move 0x%" PRIx64 " all way up (not in map): %s to index: %zu",
-                    op.m_vid,
+            SWSS_LOG_INFO("move %s all way up (not in map): %s to index: %zu",
+                    sai_serialize_object_id(op.m_vid).c_str(),
                     sai_serialize_object_type(ot).c_str(),
                     index);
 
@@ -1093,7 +1126,7 @@ void AsicView::dumpRef(const std::string & asicName)
 
     SWSS_LOG_NOTICE("dump references in ASIC VIEW: %s", asicName.c_str());
 
-    for (auto kvp: m_vidReference)
+    for (auto& kvp: m_vidReference)
     {
         sai_object_id_t oid = kvp.first;
 
@@ -1125,7 +1158,7 @@ void AsicView::dumpVidToAsicOperatioId() const
 {
     SWSS_LOG_ENTER();
 
-    for (auto a:  m_vidToAsicOperationId)
+    for (auto& a: m_vidToAsicOperationId)
     {
         auto ot = VidManager::objectTypeQuery(a.first);
 
@@ -1141,7 +1174,7 @@ void AsicView::populateAttributes(
 {
     SWSS_LOG_ENTER();
 
-    for (const auto &field: map)
+    for (const auto& field: map)
     {
         std::shared_ptr<SaiAttr> attr = std::make_shared<SaiAttr>(field.first, field.second);
 
@@ -1151,7 +1184,6 @@ void AsicView::populateAttributes(
 
             switch (meta->attrid)
             {
-
                 case SAI_ACL_COUNTER_ATTR_PACKETS:
                 case SAI_ACL_COUNTER_ATTR_BYTES:
 
@@ -1166,13 +1198,13 @@ void AsicView::populateAttributes(
                     break;
             }
         }
+
         if (obj->getObjectType() == SAI_OBJECT_TYPE_NAT_ENTRY)
         {
             auto* meta = attr->getAttrMetadata();
 
             switch (meta->attrid)
             {
-
                 case SAI_NAT_ENTRY_ATTR_HIT_BIT_COR:
                 case SAI_NAT_ENTRY_ATTR_HIT_BIT:
 
@@ -1232,7 +1264,7 @@ void AsicView::updateNonObjectIdVidReferenceCountByValue(
 
             if (m_enableRefernceCountLogs)
             {
-                SWSS_LOG_WARN("updated vid %s refrence to %d",
+                SWSS_LOG_WARN("updated vid %s reference to %d",
                         sai_serialize_object_id(vid).c_str(),
                         m_vidReference[vid]);
             }
