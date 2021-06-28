@@ -80,9 +80,9 @@ esac],[rtest=false])
 AM_CONDITIONAL(RTEST, test x$rtest = xtrue)
 
 if test x$CONFIGURED_ARCH = xarmhf && test x$CROSS_BUILD_ENVIRON = xy; then
-AM_CONDITIONAL(ARCH64, false)
+	AM_CONDITIONAL(ARCH64, false)
 else
-AM_CONDITIONAL(ARCH64, test `getconf LONG_BIT` = "64")
+	AM_CONDITIONAL(ARCH64, test `getconf LONG_BIT` = "64")
 fi
 
 AC_PATH_PROGS(SWIG, [swig3.0 swig])
